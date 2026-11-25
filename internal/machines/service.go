@@ -154,7 +154,52 @@ func New(ctx context.Context, cfg *rest.Config, namespace string, catalog *confi
 	if !c.WaitForCacheSync(syncCtx) {
 		return nil, fmt.Errorf("the cache of %s didn't sync (are KubeVirt and CDI installed, and may the service account list them?)", namespace)
 	}
+	go s.ensureIdentities(ctx)
 	return s, nil
+}
+
+// ensureIdentities gives machines from before identities theirs: the service account, and the
+// volume that has the launcher pod run as it. It takes effect at the machine's next start. Both
+// steps are idempotent, so running it at every start is harmless.
+func (s *Service) ensureIdentities(ctx context.Context) {
+	var list kubevirtv1.VirtualMachineList
+	if err := s.read.List(ctx, &list, client.InNamespace(s.Namespace), client.HasLabels{LabelMachine}); err != nil {
+		s.log.Warn("listing machines for their identities", "err", err)
+		return
+	}
+	for i := range list.Items {
+		vm := &list.Items[i]
+		if !idFormat.MatchString(vm.Name) {
+			continue
+		}
+		if err := s.write.Create(ctx, buildServiceAccount(vm)); err != nil && !apierrors.IsAlreadyExists(err) {
+			s.log.Warn("creating a machine's identity", "id", vm.Name, "err", err)
+			continue
+		}
+		if hasVolume(vm, volumeIdentity) {
+			continue
+		}
+		for attempt := 0; ; attempt++ {
+			var live kubevirtv1.VirtualMachine // fresh: the update is conditional on it
+			if err := s.write.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: vm.Name}, &live); err != nil {
+				s.log.Warn("reading a machine for its identity", "id", vm.Name, "err", err)
+				break
+			}
+			if hasVolume(&live, volumeIdentity) {
+				break
+			}
+			live.Spec.Template.Spec.Volumes = append(live.Spec.Template.Spec.Volumes, identityVolume(live.Name))
+			err := s.write.Update(ctx, &live)
+			if err == nil {
+				s.log.Info("machine given its identity (at its next start)", "id", live.Name)
+				break
+			}
+			if !apierrors.IsConflict(err) || attempt == 3 {
+				s.log.Warn("giving a machine its identity", "id", live.Name, "err", err)
+				break
+			}
+		}
+	}
 }
 
 func (s *Service) disk(ctx context.Context, id string) *cdiv1.DataVolume {
@@ -457,6 +502,10 @@ func (s *Service) Create(ctx context.Context, a Actor, r Request) (Machine, erro
 	vm := buildVM(s.Namespace, row.ID, a.Owner, s.Catalog.StorageClass, r)
 	if err := s.write.Create(ctx, vm); err != nil {
 		return abandon("creating the machine", err)
+	}
+	if err := s.write.Create(ctx, buildServiceAccount(vm)); err != nil && !apierrors.IsAlreadyExists(err) {
+		s.write.Delete(ctx, vm) // the watch then removes the row
+		return Machine{}, s.kubeError("creating the machine's identity", err)
 	}
 	if hasVolume(vm, "cloudinit") {
 		userData, err := cloudConfig(r.Name, r)

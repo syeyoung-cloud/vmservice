@@ -25,7 +25,7 @@ func stores(t *testing.T) map[string]Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.Exec(ctx, `DROP TABLE IF EXISTS media, ssh_keys, machines, members, schema_migrations`); err != nil {
+	if _, err := conn.Exec(ctx, `DROP TABLE IF EXISTS retired_machine_ids, media, ssh_keys, machines, members, schema_migrations`); err != nil {
 		t.Fatal(err)
 	}
 	conn.Close(ctx)
@@ -89,6 +89,12 @@ func TestMachines(t *testing.T) {
 			s.DeleteMachine(ctx, "vm-aaaaaa")
 			if _, err := s.Machine(ctx, "vm-aaaaaa"); !errors.Is(err, ErrNotFound) {
 				t.Errorf("after delete = %v", err)
+			}
+			if err := s.CreateMachine(ctx, Machine{ID: "vm-aaaaaa", Owner: "alice", Name: "box2"}, limit2); !errors.Is(err, ErrExists) {
+				t.Errorf("reusing a deleted machine's ID = %v, want ErrExists (IDs are never reused)", err)
+			}
+			if err := s.CreateMachine(ctx, Machine{ID: "vm-aaaaab", Owner: "alice", Name: "box"}, limit2); err != nil {
+				t.Errorf("reusing a deleted machine's name = %v (names are free again)", err)
 			}
 		})
 	}

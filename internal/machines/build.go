@@ -76,6 +76,9 @@ type Request struct {
 const (
 	volumeInstall = "install" // the ISO, cloned per machine
 	volumeDrivers = "drivers" // the virtio driver CD (Windows)
+	// The machine's service account, as the launcher pod's: KubeVirt runs the pod as it. No disk
+	// refers to it, so the guest never sees the token; the metadata relay uses it (package metadata).
+	volumeIdentity = "identity"
 )
 
 func installName(id string) string { return id + "-install" }
@@ -162,6 +165,7 @@ func buildVM(namespace, id, owner, storageClass string, r Request) *kubevirtv1.V
 						{Name: "cloudinit", VolumeSource: kubevirtv1.VolumeSource{CloudInitNoCloud: &kubevirtv1.CloudInitNoCloudSource{
 							UserDataSecretRef: &corev1.LocalObjectReference{Name: secretName(id)},
 						}}},
+						identityVolume(id),
 					},
 				},
 			},
@@ -211,6 +215,29 @@ func cloudConfig(hostname string, r Request) ([]byte, error) {
 }
 
 // buildSecret is the cloud-init Secret, owned by the VM so it goes when the VM does.
+func identityVolume(id string) kubevirtv1.Volume {
+	return kubevirtv1.Volume{Name: volumeIdentity, VolumeSource: kubevirtv1.VolumeSource{
+		ServiceAccount: &kubevirtv1.ServiceAccountVolumeSource{ServiceAccountName: id},
+	}}
+}
+
+// buildServiceAccount is the machine's identity: its tokens say
+// system:serviceaccount:<namespace>:<machine id>. It has no rights in the cluster. It is the VM's,
+// so it goes with it; machine IDs are never reused, so no later machine is ever this subject.
+func buildServiceAccount(vm *kubevirtv1.VirtualMachine) *corev1.ServiceAccount {
+	no := false
+	return &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: vm.Name, Namespace: vm.Namespace,
+			Labels: map[string]string{LabelOwner: vm.Labels[LabelOwner], LabelMachine: vm.Name},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: kubevirtv1.SchemeGroupVersion.String(), Kind: "VirtualMachine", Name: vm.Name, UID: vm.UID,
+			}},
+		},
+		AutomountServiceAccountToken: &no, // KubeVirt mounts it in the launcher pod itself
+	}
+}
+
 func buildSecret(vm *kubevirtv1.VirtualMachine, userData []byte) *corev1.Secret {
 	return &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

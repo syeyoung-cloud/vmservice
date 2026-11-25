@@ -19,12 +19,13 @@ type Memory struct {
 	machines map[string]Machine
 	keys     map[string]Key
 	media    map[string]Medium
+	retired  map[string]bool
 	clock    time.Time
 }
 
 // NewMemory is an empty Memory store.
 func NewMemory() *Memory {
-	return &Memory{members: map[string]string{}, signedIn: map[string]time.Time{}, uids: map[string]*int{}, quotas: map[string]Quota{}, machines: map[string]Machine{}, keys: map[string]Key{}, media: map[string]Medium{}, clock: time.Unix(1_800_000_000, 0)}
+	return &Memory{members: map[string]string{}, signedIn: map[string]time.Time{}, uids: map[string]*int{}, quotas: map[string]Quota{}, machines: map[string]Machine{}, keys: map[string]Key{}, media: map[string]Medium{}, retired: map[string]bool{}, clock: time.Unix(1_800_000_000, 0)}
 }
 
 func (m *Memory) now() time.Time { m.clock = m.clock.Add(time.Second); return m.clock }
@@ -103,7 +104,7 @@ func (m *Memory) CreateMachine(_ context.Context, x Machine, check func(Usage, Q
 	if err := check(m.usage(x.Owner), m.quotas[x.Owner]); err != nil {
 		return err
 	}
-	if _, ok := m.machines[x.ID]; ok {
+	if _, ok := m.machines[x.ID]; ok || m.retired[x.ID] {
 		return ErrExists
 	}
 	for _, o := range m.machines {
@@ -149,7 +150,10 @@ func (m *Memory) Usage(_ context.Context, owner string) (Usage, error) {
 func (m *Memory) DeleteMachine(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.machines, id)
+	if _, ok := m.machines[id]; ok {
+		delete(m.machines, id)
+		m.retired[id] = true
+	}
 	return nil
 }
 

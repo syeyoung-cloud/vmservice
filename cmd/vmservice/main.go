@@ -54,6 +54,12 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "bastion" {
 		os.Exit(runBastion(log, os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "relay" {
+		os.Exit(runRelay(log, os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "metadata" {
+		os.Exit(runMetadata(log, os.Args[2:]))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "inspect" {
 		os.Exit(runInspect(os.Args[2:]))
 	}

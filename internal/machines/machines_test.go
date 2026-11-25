@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -174,6 +175,18 @@ func TestCreateFromPresetGivesTheMembersAccount(t *testing.T) {
 	for _, d := range vm.Spec.Template.Spec.Domain.Devices.Disks {
 		if d.Disk == nil || d.Disk.Bus != kubevirtv1.DiskBusSCSI {
 			t.Errorf("disk %s = %+v, want virtio-scsi", d.Name, d.DiskDevice)
+		}
+	}
+	var sa corev1.ServiceAccount
+	if err := s.read.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &sa); err != nil || len(sa.OwnerReferences) != 1 || sa.OwnerReferences[0].Name != m.ID {
+		t.Errorf("the machine's service account = %+v, %v", sa.ObjectMeta, err)
+	}
+	if !hasVolume(&vm, volumeIdentity) {
+		t.Error("the VM lacks its identity volume")
+	}
+	for _, d := range vm.Spec.Template.Spec.Domain.Devices.Disks {
+		if d.Name == volumeIdentity {
+			t.Error("the identity is a disk: the guest would see the token")
 		}
 	}
 	doc, err := s.secretUserData(ctx, m.ID)
@@ -570,5 +583,35 @@ func TestResize(t *testing.T) {
 	}
 	if err := s.Resize(ctx, admin, m.ID, huge); err != nil {
 		t.Errorf("admin resize = %v (admins have no limits)", err)
+	}
+}
+
+func TestEnsureIdentitiesBackfills(t *testing.T) {
+	s, _ := testService(t)
+	ctx := context.Background()
+	img := readyImage(t, s, alice, qcowHeader(5), 700<<20, "bios")
+	m, err := s.Create(ctx, alice, request("old", img))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// as a machine from before identities: no volume, no service account
+	var vm kubevirtv1.VirtualMachine
+	s.write.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &vm)
+	vm.Spec.Template.Spec.Volumes = slices.DeleteFunc(vm.Spec.Template.Spec.Volumes, func(v kubevirtv1.Volume) bool { return v.Name == volumeIdentity })
+	s.write.Update(ctx, &vm)
+	s.write.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "cloud", Name: m.ID}})
+
+	s.ensureIdentities(ctx)
+	s.ensureIdentities(ctx) // twice: idempotent
+	s.write.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &vm)
+	n := 0
+	for _, v := range vm.Spec.Template.Spec.Volumes {
+		if v.Name == volumeIdentity {
+			n++
+		}
+	}
+	var sa corev1.ServiceAccount
+	if n != 1 || s.write.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &sa) != nil {
+		t.Errorf("after the backfill: %d identity volumes, service account found = %v", n, s.write.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &sa) == nil)
 	}
 }

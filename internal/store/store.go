@@ -117,7 +117,8 @@ type Store interface {
 	// SignedInAt is the member's last sign-in.
 	SignedInAt(ctx context.Context, owner string) (time.Time, error)
 	// CreateMachine inserts m if the owner's machines plus m stay within check's limits; check
-	// returns a *LimitError when they wouldn't.
+	// returns a *LimitError when they wouldn't. ErrExists if the ID or name is taken, or the ID was
+	// a deleted machine's (IDs are never reused).
 	CreateMachine(ctx context.Context, m Machine, check func(Usage, Quota) error) error
 	// ResizeMachine sets machine id's size if the owner's other machines plus it at that size stay
 	// within check's limits; check returns a *LimitError when they wouldn't. ErrNotFound if no machine.
@@ -286,6 +287,13 @@ func (p *Postgres) CreateMachine(ctx context.Context, m Machine, check func(Usag
 		if err := check(u, q); err != nil {
 			return err
 		}
+		var retired bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM retired_machine_ids WHERE id = $1)`, m.ID).Scan(&retired); err != nil {
+			return err
+		}
+		if retired {
+			return ErrExists // the caller draws another ID
+		}
 		_, err = tx.Exec(ctx, `INSERT INTO machines (id, owner, name, image, size, cpu, memory_mib, disk_gib, media, profile) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 			m.ID, m.Owner, m.Name, m.Image, m.Size, m.CPU, m.MemoryMiB, m.DiskGiB, m.Media, m.Profile)
 		if isUniqueViolation(err) {
@@ -403,9 +411,16 @@ func (p *Postgres) Usage(ctx context.Context, owner string) (Usage, error) {
 	return scanUsage(p.pool.QueryRow(ctx, usageQuery, owner))
 }
 
+// DeleteMachine removes the row and retires its ID, in one transaction.
 func (p *Postgres) DeleteMachine(ctx context.Context, id string) error {
-	_, err := p.pool.Exec(ctx, `DELETE FROM machines WHERE id = $1`, id)
-	return err
+	return p.serializable(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM machines WHERE id = $1`, id)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO retired_machine_ids (id) VALUES ($1) ON CONFLICT DO NOTHING`, id)
+		return err
+	})
 }
 
 func (p *Postgres) AddKey(ctx context.Context, k Key, max int) error {
