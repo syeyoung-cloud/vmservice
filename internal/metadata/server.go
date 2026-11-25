@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -40,6 +41,12 @@ type Server struct {
 	Mint func(ctx context.Context, serviceAccount string, pod *corev1.Pod, audience string) (Minted, error)
 	Log  *slog.Logger
 	Now  func() time.Time
+
+	// Requests per source address and second, counted before any verification: a token naming an
+	// unknown key makes go-oidc fetch the cluster's keys, so unchecked requests would load the API
+	// server. Each launcher pod has its own address.
+	PerSecond int
+	windows   sync.Map // source IP -> *window
 
 	// Minted tokens, per pod and audience: a guest asking again gets the same token until it is
 	// near its end, not a call to the API server each time. Dropped when the pod goes (Forget).
@@ -83,8 +90,36 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+type window struct {
+	second atomic.Int64
+	n      atomic.Int32
+}
+
+// allow counts a request from ip in the current second. Racy at the second's edge, which only
+// lets a few more through.
+func (s *Server) allow(ip string) bool {
+	if s.PerSecond <= 0 {
+		return true
+	}
+	v, _ := s.windows.LoadOrStore(ip, &window{})
+	win := v.(*window)
+	now := s.Now().Unix()
+	if win.second.Swap(now) != now {
+		win.n.Store(0)
+	}
+	return win.n.Add(1) <= int32(s.PerSecond)
+}
+
 func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		ip = r.RemoteAddr
+	}
+	if !s.allow(ip) {
+		fail(w, http.StatusTooManyRequests, "Too many requests; slow down.")
+		return
+	}
 	raw, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok {
 		fail(w, http.StatusUnauthorized, "No relay token.")

@@ -229,3 +229,55 @@ func TestFailedMintsDontUseUpAudiences(t *testing.T) {
 		t.Errorf("after %d failed mints = %d, want 200", maxAudiences+4, code)
 	}
 }
+
+func TestRelayRefusesOtherHosts(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, `{"token":"tok"}`) }))
+	defer up.Close()
+	file := filepath.Join(t.TempDir(), "token")
+	os.WriteFile(file, []byte("relay-token"), 0o600)
+	h := RelayHandler(RelayConfig{Address: "169.254.169.254", TokenFile: file, Upstream: up.URL}, up.Client())
+	for host, want := range map[string]int{
+		"169.254.169.254":     200,
+		"169.254.169.254:80":  200,
+		"rebound.example.com": http.StatusForbidden, // DNS rebinding: the page's own name
+		"localhost":           http.StatusForbidden,
+	} {
+		r := httptest.NewRequest("GET", "/v1/token?audience=a", nil)
+		r.Host = host
+		r.Header.Set("Metadata", "true")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Errorf("Host %s = %d, want %d", host, w.Code, want)
+		}
+	}
+}
+
+func TestServerRateLimitsBeforeVerifying(t *testing.T) {
+	s := newSigner(t)
+	srv, _ := testServer(t, s, launcher("p", "uid-1", ACC))
+	srv.PerSecond = 3
+	now := time.Unix(1_800_000_000, 0)
+	srv.Now = func() time.Time { return now }
+	h := srv.Handler()
+	codes := []int{}
+	for i := 0; i < 5; i++ {
+		r := httptest.NewRequest("GET", "/v1/token?audience=a", nil)
+		r.RemoteAddr = "10.244.1.2:5555"
+		r.Header.Set("Authorization", "Bearer garbage")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		codes = append(codes, w.Code)
+	}
+	if codes[2] != http.StatusUnauthorized || codes[3] != http.StatusTooManyRequests {
+		t.Errorf("codes = %v; want 401 three times, then 429 before any verifying", codes)
+	}
+	now = now.Add(time.Second)
+	r := httptest.NewRequest("GET", "/v1/token?audience=a", nil)
+	r.RemoteAddr = "10.244.1.2:5555"
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code == http.StatusTooManyRequests {
+		t.Error("still limited in the next second")
+	}
+}

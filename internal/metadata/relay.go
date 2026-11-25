@@ -73,7 +73,12 @@ func RunRelay(ctx context.Context, log *slog.Logger, c RelayConfig) error {
 	if err := syscall.Setuid(c.UID); err != nil {
 		return fmt.Errorf("setuid: %w", err)
 	}
-	srv := &http.Server{Handler: RelayHandler(c, http.DefaultClient), ReadHeaderTimeout: 5 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second}
+	srv := &http.Server{
+		Handler:           RelayHandler(c, client),
+		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 20 * time.Second,
+		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8 << 10,
+	}
 	go func() {
 		<-ctx.Done()
 		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -91,9 +96,36 @@ func RunRelay(ctx context.Context, log *slog.Logger, c RelayConfig) error {
 // a tricked web app or proxy in the guest would be, so it is refused.
 var forwardHeaders = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-Ip", "Via"}
 
-// RelayHandler answers the guest. GET /v1/token?audience=… with the header "Metadata: true".
+// relayConcurrency is how many requests the relay works on at once; more get 429. One guest can't
+// tie up the shared metadata server through it.
+const relayConcurrency = 4
+
+// RelayHandler answers the guest. GET /v1/token?audience=… with the header "Metadata: true", sent
+// to the metadata address itself (Host): a web page whose name was made to resolve to the address
+// (DNS rebinding) sends its own name, and is refused.
 func RelayHandler(c RelayConfig, client *http.Client) http.Handler {
+	slots := make(chan struct{}, relayConcurrency)
 	mux := http.NewServeMux()
+	guard := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			host := r.Host
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+			if c.Address != "" && host != c.Address {
+				fail(w, http.StatusForbidden, "Ask http://"+c.Address+"/ by its address.")
+				return
+			}
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			default:
+				fail(w, http.StatusTooManyRequests, "Too many requests at once; try again.")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok\n") })
 	mux.HandleFunc("GET /v1/token", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -146,7 +178,7 @@ func RelayHandler(c RelayConfig, client *http.Client) http.Handler {
 		w.WriteHeader(resp.StatusCode)
 		w.Write(body)
 	})
-	return mux
+	return guard(mux)
 }
 
 func fail(w http.ResponseWriter, status int, message string) {

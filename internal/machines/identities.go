@@ -149,6 +149,17 @@ func (s *Service) DeleteIdentity(ctx context.Context, a Actor, account string) e
 	if err != nil {
 		return s.storeError("reading the identity", err)
 	}
+	// A machine switched to another identity runs as this one until its next start, and is handed
+	// its tokens meanwhile; deleting it then would revoke nothing. Refused until it has restarted.
+	var pods corev1.PodList
+	if err := s.write.List(ctx, &pods, client.InNamespace(s.Namespace), client.MatchingLabels{"kubevirt.io": "virt-launcher"}); err != nil {
+		return s.kubeError("checking which machines run as the identity", err)
+	}
+	for _, p := range pods.Items {
+		if p.Spec.ServiceAccountName == account && p.Status.Phase != corev1.PodSucceeded && p.Status.Phase != corev1.PodFailed {
+			return refuse(http.StatusConflict, "A running machine still wears this identity (until its next start): restart it first.")
+		}
+	}
 	switch err := s.store.DeleteIdentity(ctx, account); {
 	case errors.Is(err, store.ErrInUse):
 		return refuse(http.StatusConflict, "Machines wear this identity: give them another first.")
@@ -237,6 +248,13 @@ func (s *Service) identityAccount(i store.Identity) *corev1.ServiceAccount {
 // outlives its identity; each machine from before identities gets one of its own, named after it,
 // in effect at its next start. All of it is idempotent.
 func (s *Service) ensureIdentities(ctx context.Context) {
+	// The accounts are listed before the rows are read: an identity made in between has its row
+	// in the read, so its account is never taken for an orphan.
+	var sas corev1.ServiceAccountList
+	listed := s.write.List(ctx, &sas, client.InNamespace(s.Namespace), client.HasLabels{LabelIdentity})
+	if listed != nil {
+		s.log.Warn("listing identities' service accounts", "err", listed)
+	}
 	all, err := s.store.AllIdentities(ctx)
 	if err != nil {
 		s.log.Warn("listing identities", "err", err)
@@ -249,12 +267,8 @@ func (s *Service) ensureIdentities(ctx context.Context) {
 			s.log.Warn("creating an identity's service account", "account", i.Account, "err", err)
 		}
 	}
-	var sas corev1.ServiceAccountList
-	if err := s.write.List(ctx, &sas, client.InNamespace(s.Namespace), client.HasLabels{LabelIdentity}); err != nil {
-		s.log.Warn("listing identities' service accounts", "err", err)
-	}
 	for _, sa := range sas.Items {
-		if !known[sa.Name] {
+		if listed == nil && !known[sa.Name] {
 			s.deleteIdentityAccount(ctx, sa.Name)
 		}
 	}

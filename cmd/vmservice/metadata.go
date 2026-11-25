@@ -93,7 +93,7 @@ func runMetadata(log *slog.Logger, args []string) int {
 		informers.WithTweakListOptions(func(o *metav1.ListOptions) { o.LabelSelector = "kubevirt.io=virt-launcher" }))
 	pods := factory.Core().V1().Pods()
 	srv := &metadata.Server{
-		Namespace: *namespace, Issuer: *issuer, Verifier: verifier, Log: log, Now: time.Now,
+		Namespace: *namespace, Issuer: *issuer, Verifier: verifier, Log: log, Now: time.Now, PerSecond: 5,
 		// and its own: a token made out to it is as good as the relay's, and could be replayed to it
 		RefusedAudiences: append(strings.Split(*refused, ","), *audience),
 		Pod: func(name string) (*corev1.Pod, bool) {
@@ -129,7 +129,8 @@ func runMetadata(log *slog.Logger, args []string) int {
 		log.Error("pod cache did not sync")
 		return 1
 	}
-	hs := &http.Server{Addr: *listen, Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	hs := &http.Server{Addr: *listen, Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout: 10 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 << 10}
 	go func() {
 		<-ctx.Done()
 		shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)

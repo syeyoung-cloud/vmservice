@@ -140,8 +140,8 @@ type Store interface {
 	CreateMachine(ctx context.Context, m Machine, check func(Usage, Quota) error) error
 	// SetMachineIdentity has the machine wear another identity of its owner's (ErrNoIdentity).
 	SetMachineIdentity(ctx context.Context, id, account string) error
-	// MarkDeleteIdentity has the machine's identity go with its row (DeleteMachine).
-	MarkDeleteIdentity(ctx context.Context, id string) error
+	// MarkDeleteIdentity has the machine's identity go with its row (DeleteMachine), or not.
+	MarkDeleteIdentity(ctx context.Context, id string, with bool) error
 	// CreateIdentity inserts i if the owner has fewer than max; ErrExists if the owner has one by
 	// that name or the account is (or was) taken; *LimitError over max.
 	CreateIdentity(ctx context.Context, i Identity, max int) error
@@ -393,13 +393,14 @@ func (p *Postgres) SetMachineIdentity(ctx context.Context, id, account string) e
 		if err := identityOf(ctx, tx, account, owner); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE machines SET identity = $2 WHERE id = $1`, id, account)
+		// another identity: a delete-with-it flag from a failed delete was for the old one
+		_, err = tx.Exec(ctx, `UPDATE machines SET identity = $2, delete_identity = false WHERE id = $1`, id, account)
 		return err
 	})
 }
 
-func (p *Postgres) MarkDeleteIdentity(ctx context.Context, id string) error {
-	tag, err := p.pool.Exec(ctx, `UPDATE machines SET delete_identity = true WHERE id = $1`, id)
+func (p *Postgres) MarkDeleteIdentity(ctx context.Context, id string, with bool) error {
+	tag, err := p.pool.Exec(ctx, `UPDATE machines SET delete_identity = $2 WHERE id = $1`, id, with)
 	if err == nil && tag.RowsAffected() == 0 {
 		return ErrNotFound
 	}

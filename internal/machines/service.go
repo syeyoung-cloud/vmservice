@@ -664,7 +664,7 @@ func (s *Service) Delete(ctx context.Context, a Actor, id string, withIdentity b
 			return refuse(http.StatusConflict, "The machine is still being created; try again in a moment.")
 		default:
 			if withIdentity {
-				s.store.MarkDeleteIdentity(ctx, id)
+				s.store.MarkDeleteIdentity(ctx, id, true)
 			}
 			gone, err := s.store.DeleteMachine(ctx, id)
 			if err != nil {
@@ -679,11 +679,14 @@ func (s *Service) Delete(ctx context.Context, a Actor, id string, withIdentity b
 	if vm != nil {
 		// The identity goes with the row, which the VM watch removes once the VM is gone.
 		if withIdentity {
-			if err := s.store.MarkDeleteIdentity(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+			if err := s.store.MarkDeleteIdentity(ctx, id, true); err != nil && !errors.Is(err, store.ErrNotFound) {
 				return s.storeError("marking the identity to go", err)
 			}
 		}
 		if err := s.write.Delete(ctx, vm, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
+			if withIdentity {
+				s.store.MarkDeleteIdentity(ctx, id, false) // the machine stays, and so does what it wears
+			}
 			return s.kubeError("deleting the machine", err)
 		}
 	}

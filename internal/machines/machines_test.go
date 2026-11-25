@@ -730,3 +730,44 @@ func TestEnsureIdentitiesBackfills(t *testing.T) {
 		t.Errorf("identity accounts = %d (the deleted one's must be gone, the new one there)", len(sas.Items))
 	}
 }
+
+func TestIdentityWornByARunningPodCantBeDeleted(t *testing.T) {
+	s, _ := testService(t)
+	ctx := context.Background()
+	img := readyImage(t, s, alice, qcowHeader(5), 700<<20, "bios")
+	m, err := s.Create(ctx, alice, request("swap", img))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.CreateIdentity(ctx, alice, "next")
+	if err := s.SetIdentity(ctx, alice, m.ID, "next"); err != nil {
+		t.Fatal(err)
+	}
+	// its launcher pod still runs as the old one until the machine restarts
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "virt-launcher-swap", Namespace: "cloud", Labels: map[string]string{"kubevirt.io": "virt-launcher"}},
+		Spec: corev1.PodSpec{ServiceAccountName: m.IdentityAccount}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+	s.write.Create(ctx, pod)
+	if err := s.DeleteIdentity(ctx, alice, m.IdentityAccount); status(err) != http.StatusConflict {
+		t.Errorf("deleting an identity a running pod wears = %v, want 409", err)
+	}
+	s.write.Delete(ctx, pod)
+	if err := s.DeleteIdentity(ctx, alice, m.IdentityAccount); err != nil {
+		t.Errorf("after the restart = %v", err)
+	}
+}
+
+func TestDeleteFlagDoesntOutliveAnIdentityChange(t *testing.T) {
+	s, _ := testService(t)
+	ctx := context.Background()
+	img := readyImage(t, s, alice, qcowHeader(5), 700<<20, "bios")
+	m, err := s.Create(ctx, alice, request("keep", img))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.store.MarkDeleteIdentity(ctx, m.ID, true) // as a delete that failed after marking
+	s.CreateIdentity(ctx, alice, "kept")
+	s.SetIdentity(ctx, alice, m.ID, "kept")
+	if row, _ := s.store.Machine(ctx, m.ID); row.DeleteIdentity {
+		t.Error("the delete-with-it flag survived an identity change")
+	}
+}

@@ -187,7 +187,7 @@ func TestIdentities(t *testing.T) {
 				t.Errorf("deleting a worn identity = %v, want ErrInUse", err)
 			}
 			// marked to go with its machine, but the other machine still wears it
-			s.MarkDeleteIdentity(ctx, "vm-e00001")
+			s.MarkDeleteIdentity(ctx, "vm-e00001", true)
 			if gone, err := s.DeleteMachine(ctx, "vm-e00001"); err != nil || gone != "" {
 				t.Errorf("deleting one wearer = %q, %v; want the identity kept", gone, err)
 			}
@@ -203,7 +203,7 @@ func TestIdentities(t *testing.T) {
 			if err := s.CreateIdentity(ctx, a, 5); !errors.Is(err, ErrExists) {
 				t.Errorf("making a deleted account again = %v, want ErrExists (never reused)", err)
 			}
-			s.MarkDeleteIdentity(ctx, "vm-e00002")
+			s.MarkDeleteIdentity(ctx, "vm-e00002", true)
 			if gone, err := s.DeleteMachine(ctx, "vm-e00002"); err != nil || gone != "identity-two-dddddddd" {
 				t.Errorf("deleting its last wearer = %q, %v; want the identity gone with it", gone, err)
 			}

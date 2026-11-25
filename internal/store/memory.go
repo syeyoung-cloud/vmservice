@@ -187,19 +187,19 @@ func (m *Memory) SetMachineIdentity(_ context.Context, id, account string) error
 	if account == "" || m.idents[account].Owner != x.Owner {
 		return ErrNoIdentity
 	}
-	x.Identity, x.IdentityName = account, m.idents[account].Name
+	x.Identity, x.IdentityName, x.DeleteIdentity = account, m.idents[account].Name, false
 	m.machines[id] = x
 	return nil
 }
 
-func (m *Memory) MarkDeleteIdentity(_ context.Context, id string) error {
+func (m *Memory) MarkDeleteIdentity(_ context.Context, id string, with bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	x, ok := m.machines[id]
 	if !ok {
 		return ErrNotFound
 	}
-	x.DeleteIdentity = true
+	x.DeleteIdentity = with
 	m.machines[id] = x
 	return nil
 }
