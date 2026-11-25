@@ -79,7 +79,7 @@ func testServer(t *testing.T, s *signer, pods ...*corev1.Pod) (*Server, *atomic.
 	keys := &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{&s.key.PublicKey}}
 	mints := new(atomic.Int32)
 	srv := &Server{
-		Namespace: ns, Issuer: issuer, RefusedAudiences: []string{"https://kubernetes.default.svc"},
+		Namespace: ns, Issuer: issuer, RefusedAudiences: []string{"https://kubernetes.default.svc", audience},
 		Verifier: oidc.NewVerifier(issuer, keys, &oidc.Config{ClientID: audience}),
 		Pod: func(name string) (*corev1.Pod, bool) {
 			for _, p := range pods {
@@ -143,7 +143,7 @@ func TestServerMintsForTheMachinesLivePod(t *testing.T) {
 			t.Errorf("%s = %d, want 401", name, code)
 		}
 	}
-	for _, aud := range []string{"", "a%0Ab", strings.Repeat("a", 257), "https://kubernetes.default.svc"} {
+	for _, aud := range []string{"", "a%0Ab", strings.Repeat("a", 257), "https://kubernetes.default.svc", audience} {
 		if code, _ := ask(h, good, aud); code != http.StatusBadRequest {
 			t.Errorf("audience %q = %d, want 400", aud, code)
 		}
@@ -209,5 +209,23 @@ func TestRelay(t *testing.T) {
 		if w := do(c.target, c.headers); w.Code != http.StatusBadRequest {
 			t.Errorf("%s = %d, want 400", name, w.Code)
 		}
+	}
+}
+
+func TestFailedMintsDontUseUpAudiences(t *testing.T) {
+	s := newSigner(t)
+	srv, _ := testServer(t, s, launcher("p", "uid-1", ACC))
+	ok := srv.Mint
+	srv.Mint = func(context.Context, string, *corev1.Pod, string) (Minted, error) {
+		return Minted{}, io.ErrUnexpectedEOF
+	}
+	h := srv.Handler()
+	good := s.relayToken(t, ns, ACC, "p", "uid-1")
+	for i := 0; i < maxAudiences+4; i++ {
+		ask(h, good, "aud"+string(rune('a'+i)))
+	}
+	srv.Mint = ok
+	if code, _ := ask(h, good, "after-the-blip"); code != 200 {
+		t.Errorf("after %d failed mints = %d, want 200", maxAudiences+4, code)
 	}
 }

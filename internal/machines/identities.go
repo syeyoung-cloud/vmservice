@@ -23,7 +23,8 @@ import (
 // one, and every machine wears exactly one: a new machine its own, named after it, unless its
 // creator picks one of theirs.
 
-// LabelIdentity marks an identity's ServiceAccount, with its account as the value.
+// LabelIdentity marks an identity's ServiceAccount ("true"; the account, up to 81 characters, is
+// longer than a label value may be).
 const LabelIdentity = "vmservice/identity"
 
 // MaxIdentities is how many identities a member may have.
@@ -226,7 +227,7 @@ func (s *Service) identityAccount(i store.Identity) *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: i.Account, Namespace: s.Namespace,
-			Labels: map[string]string{LabelOwner: i.Owner, LabelIdentity: i.Account},
+			Labels: map[string]string{LabelOwner: i.Owner, LabelIdentity: "true"},
 		},
 		AutomountServiceAccountToken: &no, // KubeVirt mounts it in the launcher pod itself
 	}
@@ -264,6 +265,15 @@ func (s *Service) ensureIdentities(ctx context.Context) {
 	}
 	for _, row := range rows {
 		if row.Identity != "" {
+			// The row is the record; a VM left wearing another (a change that failed half way) is
+			// put right, in effect at its next start.
+			if vm := s.vm(ctx, row.ID); vm != nil && identityOfVM(vm) != row.Identity {
+				if err := s.wearIdentity(ctx, row.ID, row.Identity); err != nil {
+					s.log.Warn("putting a machine's identity right", "id", row.ID, "err", err)
+				} else {
+					s.log.Info("machine's identity put right (at its next start)", "id", row.ID, "account", row.Identity)
+				}
+			}
 			continue
 		}
 		var i store.Identity
@@ -287,6 +297,16 @@ func (s *Service) ensureIdentities(ctx context.Context) {
 		}
 		s.log.Info("machine given its own identity (at its next start)", "id", row.ID, "account", i.Account)
 	}
+}
+
+// identityOfVM is the account the VM's identity volume names, or "".
+func identityOfVM(vm *kubevirtv1.VirtualMachine) string {
+	for _, v := range vm.Spec.Template.Spec.Volumes {
+		if v.Name == volumeIdentity && v.ServiceAccount != nil {
+			return v.ServiceAccount.ServiceAccountName
+		}
+	}
+	return ""
 }
 
 // randomSuffix is 8 characters from the ID alphabet (no 0/o, 1/l).

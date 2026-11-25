@@ -29,8 +29,9 @@ type Minted struct {
 type Server struct {
 	Namespace string
 	Issuer    string // the cluster's, which is also what the minted tokens say
-	// RefusedAudiences are the API server's (k0s --api-audiences): a token made out to one would
-	// work against the cluster, and could be used to get more. The admission policy refuses them too.
+	// RefusedAudiences are the API server's (k0s --api-audiences), whose token would work against
+	// the cluster, and this server's own, whose token would be as good as a relay's and could be
+	// replayed here for more. The admission policy refuses them too.
 	RefusedAudiences []string
 	Verifier         *oidc.IDTokenVerifier
 	// Pod is a launcher pod from the informer's cache.
@@ -118,7 +119,7 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	audience := aud[0]
 	for _, refused := range s.RefusedAudiences {
 		if audience == refused {
-			fail(w, http.StatusBadRequest, "Tokens can't be made out to the cluster's API server.")
+			fail(w, http.StatusBadRequest, "Tokens can't be made out to the cluster's API server or to the metadata service.")
 			return
 		}
 	}
@@ -128,7 +129,8 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		s.answer(w, m.(Minted), account)
 		return
 	}
-	if _, kept := pt.tokens.Load(audience); !kept {
+	_, kept := pt.tokens.Load(audience)
+	if !kept {
 		if pt.n.Add(1) > maxAudiences {
 			pt.n.Add(-1)
 			fail(w, http.StatusTooManyRequests, "This machine has asked for too many different audiences.")
@@ -137,6 +139,9 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 	}
 	m, err := s.Mint(r.Context(), account, pod, audience)
 	if err != nil {
+		if !kept {
+			pt.n.Add(-1) // nothing was kept for it
+		}
 		s.Log.Warn("minting a machine token", "account", account, "err", err)
 		fail(w, http.StatusServiceUnavailable, "A token can't be made right now; try again.")
 		return

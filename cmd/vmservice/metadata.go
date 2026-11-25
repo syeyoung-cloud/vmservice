@@ -94,7 +94,8 @@ func runMetadata(log *slog.Logger, args []string) int {
 	pods := factory.Core().V1().Pods()
 	srv := &metadata.Server{
 		Namespace: *namespace, Issuer: *issuer, Verifier: verifier, Log: log, Now: time.Now,
-		RefusedAudiences: strings.Split(*refused, ","),
+		// and its own: a token made out to it is as good as the relay's, and could be replayed to it
+		RefusedAudiences: append(strings.Split(*refused, ","), *audience),
 		Pod: func(name string) (*corev1.Pod, bool) {
 			p, err := pods.Lister().Pods(*namespace).Get(name)
 			return p, err == nil

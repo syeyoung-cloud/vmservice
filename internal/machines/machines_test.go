@@ -182,7 +182,7 @@ func TestCreateFromPresetGivesTheMembersAccount(t *testing.T) {
 		t.Errorf("machine identity = %q %q", m.Identity, m.IdentityAccount)
 	}
 	var sa corev1.ServiceAccount
-	if err := s.read.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.IdentityAccount}, &sa); err != nil || sa.Labels[LabelIdentity] != m.IdentityAccount {
+	if err := s.read.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.IdentityAccount}, &sa); err != nil || sa.Labels[LabelIdentity] != "true" {
 		t.Errorf("the identity's service account = %+v, %v", sa.ObjectMeta, err)
 	}
 	if v := identityOfVM(&vm); v != m.IdentityAccount {
@@ -590,15 +590,6 @@ func TestResize(t *testing.T) {
 	}
 }
 
-func identityOfVM(vm *kubevirtv1.VirtualMachine) string {
-	for _, v := range vm.Spec.Template.Spec.Volumes {
-		if v.Name == volumeIdentity && v.ServiceAccount != nil {
-			return v.ServiceAccount.ServiceAccountName
-		}
-	}
-	return ""
-}
-
 func TestIdentities(t *testing.T) {
 	s, _ := testService(t)
 	ctx := context.Background()
@@ -665,6 +656,45 @@ func TestIdentities(t *testing.T) {
 	}
 	if list, _ := s.Identities(ctx, alice); len(list) != 1 || list[0].Name != "other" {
 		t.Errorf("after deleting its last wearer with it: %+v", list)
+	}
+}
+
+// A long machine name (63) makes an identity whose account (81) is longer than a label value.
+func TestLongNameIdentity(t *testing.T) {
+	s, _ := testService(t)
+	ctx := context.Background()
+	img := readyImage(t, s, alice, qcowHeader(5), 700<<20, "bios")
+	name := strings.Repeat("a", 63)
+	m, err := s.Create(ctx, alice, request(name, img))
+	if err != nil {
+		t.Fatalf("a 63-character machine name = %v", err)
+	}
+	var sa corev1.ServiceAccount
+	if err := s.read.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.IdentityAccount}, &sa); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range sa.Labels {
+		if len(v) > 63 {
+			t.Errorf("label %s is %d characters (the API server takes 63)", k, len(v))
+		}
+	}
+}
+
+func TestEnsureIdentitiesRepairsTheVM(t *testing.T) {
+	s, _ := testService(t)
+	ctx := context.Background()
+	img := readyImage(t, s, alice, qcowHeader(5), 700<<20, "bios")
+	m, err := s.Create(ctx, alice, request("drift", img))
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _ := s.CreateIdentity(ctx, alice, "other")
+	s.wearIdentity(ctx, m.ID, other.Account) // the VM changed, the row didn't
+	s.ensureIdentities(ctx)
+	var vm kubevirtv1.VirtualMachine
+	s.read.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &vm)
+	if identityOfVM(&vm) != m.IdentityAccount {
+		t.Errorf("the VM wears %q after the repair, want the row's %q", identityOfVM(&vm), m.IdentityAccount)
 	}
 }
 
