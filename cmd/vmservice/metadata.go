@@ -56,6 +56,7 @@ func runMetadata(log *slog.Logger, args []string) int {
 	issuer := fs.String("issuer", "", "the cluster's service account issuer (required)")
 	audience := fs.String("audience", "", "the audience the relays' tokens are made out to (required)")
 	jwksURL := fs.String("jwks-url", "", "the cluster's signing keys (default: the API server's /openid/v1/jwks)")
+	refused := fs.String("refused-audiences", "https://kubernetes.default.svc,system:konnectivity-server", "the API server's audiences (k0s --api-audiences), refused, comma separated")
 	fs.Parse(args)
 	for name, v := range map[string]string{"namespace": *namespace, "issuer": *issuer, "audience": *audience} {
 		if v == "" {
@@ -93,6 +94,7 @@ func runMetadata(log *slog.Logger, args []string) int {
 	pods := factory.Core().V1().Pods()
 	srv := &metadata.Server{
 		Namespace: *namespace, Issuer: *issuer, Verifier: verifier, Log: log, Now: time.Now,
+		RefusedAudiences: strings.Split(*refused, ","),
 		Pod: func(name string) (*corev1.Pod, bool) {
 			p, err := pods.Lister().Pods(*namespace).Get(name)
 			return p, err == nil

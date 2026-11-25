@@ -50,6 +50,10 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/vms/{id}", a.read(a.get))
 	mux.HandleFunc("POST /api/vms", a.write(a.create))
 	mux.HandleFunc("PUT /api/vms/{id}/size", a.write(a.resize))
+	mux.HandleFunc("PUT /api/vms/{id}/identity", a.write(a.setIdentity))
+	mux.HandleFunc("GET /api/identities", a.read(a.identities))
+	mux.HandleFunc("POST /api/identities", a.write(a.addIdentity))
+	mux.HandleFunc("DELETE /api/identities/{account}", a.write(a.deleteIdentity))
 	mux.HandleFunc("POST /api/vms/{id}/{action}", a.write(a.action))
 	mux.HandleFunc("DELETE /api/vms/{id}", a.write(a.remove))
 	for _, base := range []string{"/api/images", "/api/media"} { // media: the old name
@@ -182,6 +186,7 @@ type createBody struct {
 	Size     string `json:"size"`
 	DiskGiB  int    `json:"diskGiB"`
 	Password string `json:"password"`
+	Identity string `json:"identity"` // one of the member's by name; "": a new one, named after the machine
 }
 
 var control = regexp.MustCompile(`[\x00-\x1f\x7f]`)
@@ -222,7 +227,7 @@ func (a *API) create(r *http.Request, s auth.Session) (int, any, error) {
 		}
 	}
 	m, err := a.machines.Create(r.Context(), actor(s), machines.Request{Name: b.Name, Size: size, DiskGiB: b.DiskGiB, PasswordHash: hash,
-		MediaID: image, ProfileOverride: b.Profile})
+		MediaID: image, ProfileOverride: b.Profile, Identity: strings.TrimSpace(b.Identity)})
 	return http.StatusCreated, m, err
 }
 
@@ -398,8 +403,48 @@ func (a *API) resize(r *http.Request, s auth.Session) (int, any, error) {
 	return http.StatusNoContent, nil, a.machines.Resize(r.Context(), actor(s), r.PathValue("id"), size)
 }
 
+// remove deletes a machine; ?identity=delete deletes its identity too, once the machine is gone, if
+// no other machine wears it then.
 func (a *API) remove(r *http.Request, s auth.Session) (int, any, error) {
-	return http.StatusNoContent, nil, a.machines.Delete(r.Context(), actor(s), r.PathValue("id"))
+	withIdentity := r.URL.Query().Get("identity") == "delete"
+	return http.StatusNoContent, nil, a.machines.Delete(r.Context(), actor(s), r.PathValue("id"), withIdentity)
+}
+
+func (a *API) setIdentity(r *http.Request, s auth.Session) (int, any, error) {
+	var b struct {
+		Identity string `json:"identity"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&b); err != nil || b.Identity == "" {
+		return 0, nil, bad("Give the name of an identity: {\"identity\": \"…\"}.")
+	}
+	return http.StatusNoContent, nil, a.machines.SetIdentity(r.Context(), actor(s), r.PathValue("id"), b.Identity)
+}
+
+func (a *API) identities(r *http.Request, s auth.Session) (int, any, error) {
+	list, err := a.machines.Identities(r.Context(), actor(s))
+	return http.StatusOK, map[string]any{"identities": list}, err
+}
+
+func (a *API) addIdentity(r *http.Request, s auth.Session) (int, any, error) {
+	var b struct {
+		Name string `json:"name"`
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 4<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&b); err != nil {
+		return 0, nil, bad("The request isn't valid JSON for an identity: {\"name\": \"…\"}.")
+	}
+	if err := a.machines.EnsureMember(r.Context(), s.Owner, s.Username); err != nil {
+		return 0, nil, err
+	}
+	i, err := a.machines.CreateIdentity(r.Context(), actor(s), strings.TrimSpace(b.Name))
+	return http.StatusCreated, i, err
+}
+
+func (a *API) deleteIdentity(r *http.Request, s auth.Session) (int, any, error) {
+	return http.StatusNoContent, nil, a.machines.DeleteIdentity(r.Context(), actor(s), r.PathValue("account"))
 }
 
 // events is the server-sent event stream of the member's machines: a snapshot, then changes as the

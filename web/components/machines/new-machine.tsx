@@ -12,6 +12,7 @@ import { ErrorText } from "@/components/ui/error-text";
 import { Icon } from "@/components/ui/icon";
 import { TextInput } from "@/components/ui/text-input";
 import { loadCatalog } from "@/lib/api/catalog";
+import { loadIdentities } from "@/lib/api/identities";
 import { loadKeys } from "@/lib/api/keys";
 import { get, post } from "@/lib/api/http";
 import { formatBytes, kindLabel, profileLabel, profileLabels } from "@/lib/api/images";
@@ -146,6 +147,11 @@ const Form = ({ catalog }: { readonly catalog: Catalog }) => {
   const [size, setSize] = useState(catalog.sizes[0]?.id ?? "");
   const [disk, setDisk] = useState(String(catalog.disk.defaultGiB));
   const [password, setPassword] = useState("");
+  // "": a new identity, named after the machine; else one of the member's by name.
+  const [identity, setIdentity] = useState("");
+  const identities = useResource(loadIdentities);
+  const ownIdentities = identities.data?.filter((item) => item.mine) ?? [];
+  const nameIsAnIdentity = identity === "" && ownIdentities.some((item) => item.name === name.trim());
   const [confirmation, setConfirmation] = useState("");
 
   const chosenSize = catalog.sizes.find((item) => item.id === size);
@@ -181,7 +187,8 @@ const Form = ({ catalog }: { readonly catalog: Catalog }) => {
   const matches = installerSignsIn || password === confirmation;
   const limitProblem =
     machines && chosenSize ? overLimit(catalog, machines, chosenSize.cpu, chosenSize.memoryMiB, diskValid ? diskGiB : 0) : null;
-  const ready = nameValid && chosenImage !== undefined && chosenSize && diskValid && passwordValid && matches && !limitProblem;
+  const ready =
+    nameValid && chosenImage !== undefined && chosenSize && diskValid && passwordValid && matches && !limitProblem && !nameIsAnIdentity;
 
   const submit = () => {
     if (!ready || !chosenImage) {
@@ -194,6 +201,7 @@ const Form = ({ catalog }: { readonly catalog: Catalog }) => {
       size,
       diskGiB,
       password: installerSignsIn ? "" : password,
+      ...(identity ? { identity } : {}),
     };
     const result: { machine: Machine | null } = { machine: null };
     void action
@@ -340,6 +348,28 @@ const Form = ({ catalog }: { readonly catalog: Catalog }) => {
             value={disk}
             onChange={(event) => setDisk(event.target.value)}
             aria-invalid={!diskValid || undefined}
+          />
+        </FormField>
+        <FormField
+          label="Identity"
+          hint={
+            nameIsAnIdentity
+              ? `You already have an identity named ${name.trim()}: choose it here, or name the machine differently.`
+              : "What the machine is to other services (its tokens at 169.254.169.254). Machines that wear the same identity share what's granted to it."
+          }
+        >
+          <SelectField
+            label="Identity"
+            items={[
+              { value: "", label: "Its own", description: trimmedName ? `A new identity named ${trimmedName}` : "A new identity named after the machine" },
+              ...ownIdentities.map((item) => ({
+                value: item.name,
+                label: item.name,
+                description: item.usedBy.length === 0 ? "Worn by no machine yet" : `Also worn by ${item.usedBy.join(", ")}`,
+              })),
+            ]}
+            value={identity}
+            onChange={setIdentity}
           />
         </FormField>
       </section>

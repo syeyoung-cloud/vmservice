@@ -5,12 +5,12 @@
 // NVIDIA's DSX IMDS does). It puts 169.254.169.254 on the pod's loopback, so the guest's requests
 // to it, which arrive through the masquerade gateway, are delivered in the pod; then it gives up
 // root and every capability before it serves. It holds one thing: a token of the pod's service
-// account (the machine's own, named by its machine ID), projected for the metadata server only and
-// mounted in this container only. The guest, inside QEMU, never sees it.
+// account (the identity the machine wears, package machines), projected for the metadata server only
+// and mounted in this container only. The guest, inside QEMU, never sees it.
 //
 // The server (Server) is a Deployment of its own. It verifies the relay's token against the
-// cluster's keys, checks it names a live launcher pod of that machine, and asks the API server for
-// a token of the machine's service account with the audience the guest asked for (TokenRequest,
+// cluster's keys, checks it names a live launcher pod running as an identity's account, and asks
+// the API server for a token of that account with the audience the guest asked for (TokenRequest,
 // bound to the pod).
 package metadata
 

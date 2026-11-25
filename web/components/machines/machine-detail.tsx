@@ -17,11 +17,13 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { ErrorText } from "@/components/ui/error-text";
 import { Icon } from "@/components/ui/icon";
 import { loadCatalog } from "@/lib/api/catalog";
+import { loadIdentities } from "@/lib/api/identities";
 import { ApiError, get, post, put, remove } from "@/lib/api/http";
 import type { Catalog, Machine } from "@/lib/api/types";
 import { formatCpu, formatMemory, formatTime } from "@/lib/formatting/format";
 import { profileLabel } from "@/lib/api/images";
 import { useAction } from "@/lib/hooks/use-action";
+import { useResource } from "@/lib/hooks/use-resource";
 import { messageOf } from "@/lib/errors";
 import { sshCommand } from "@/lib/paths";
 import { classNames } from "@/lib/utilities/class-names";
@@ -42,6 +44,7 @@ const DeleteDialog = ({ machine, onClose }: { readonly machine: Machine; readonl
   const router = useRouter();
   const action = useAction();
   const [typed, setTyped] = useState("");
+  const [withIdentity, setWithIdentity] = useState(false);
   // The member types the machine's name to confirm: deleting can't be undone.
   const confirmed = typed === machine.name;
   return (
@@ -57,7 +60,8 @@ const DeleteDialog = ({ machine, onClose }: { readonly machine: Machine; readonl
         if (!confirmed) {
           return;
         }
-        void action.run(() => remove(`/api/vms/${encodeURIComponent(machine.id)}`)).then((done) => {
+        const query = withIdentity ? "?identity=delete" : "";
+        void action.run(() => remove(`/api/vms/${encodeURIComponent(machine.id)}${query}`)).then((done) => {
           if (done) {
             router.push("/");
           }
@@ -80,6 +84,69 @@ const DeleteDialog = ({ machine, onClose }: { readonly machine: Machine; readonl
           spellCheck={false}
         />
       </label>
+      {machine.identity ? (
+        <label className="mt-3 flex items-start gap-2 text-[13px] text-foreground-secondary">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            checked={withIdentity}
+            onChange={(event) => setWithIdentity(event.target.checked)}
+          />
+          <span>
+            Delete its identity <span className="font-mono text-foreground">{machine.identity}</span> too, if no other machine
+            wears it then. What was granted to it stops working.
+          </span>
+        </label>
+      ) : null}
+    </DialogFrame>
+  );
+};
+
+const IdentityDialog = ({ machine, onClose }: { readonly machine: Machine; readonly onClose: () => void }) => {
+  const action = useAction();
+  const identities = useResource(loadIdentities);
+  const [chosen, setChosen] = useState(machine.identity ?? "");
+  // The owner's identities: a machine wears only its owner's.
+  const owners = (identities.data ?? []).filter((item) => (machine.owner ? item.owner === machine.owner : item.mine));
+  const live = machine.state === "Running" || machine.state === "Starting";
+  return (
+    <DialogFrame
+      title="Wear another identity?"
+      onClose={onClose}
+      submitLabel="Change identity"
+      pending={action.pending}
+      submitDisabled={chosen === "" || chosen === machine.identity}
+      error={action.error ?? identities.error}
+      onSubmit={() =>
+        void action.run(() => put(`/api/vms/${encodeURIComponent(machine.id)}/identity`, { identity: chosen })).then((done) => {
+          if (done) {
+            onClose();
+          }
+        })
+      }
+    >
+      <div className="flex flex-col gap-3">
+        {identities.data ? (
+          <FormField label="Identity">
+            <SelectField
+              label="Identity"
+              items={owners.map((item) => ({
+                value: item.name,
+                label: item.name,
+                description: item.usedBy.length === 0 ? "Worn by no machine" : `Worn by ${item.usedBy.join(", ")}`,
+              }))}
+              value={chosen}
+              onChange={setChosen}
+            />
+          </FormField>
+        ) : null}
+        <p className="text-[13px] text-foreground-secondary">
+          Make new identities on the Identities page. The one it wears now stays there.{" "}
+          {live
+            ? "The machine keeps its current identity until you Restart or Stop and Start it here."
+            : "It applies the next time the machine starts."}
+        </p>
+      </div>
     </DialogFrame>
   );
 };
@@ -168,6 +235,7 @@ const Actions = ({ machine }: { readonly machine: Machine }) => {
   const [deleting, setDeleting] = useState(false);
   const [ejecting, setEjecting] = useState(false);
   const [resizing, setResizing] = useState(false);
+  const [changingIdentity, setChangingIdentity] = useState(false);
   const run = (verb: "start" | "stop" | "restart") =>
     void action.run(() => post(`/api/vms/${encodeURIComponent(machine.id)}/${verb}`));
   const { state } = machine;
@@ -199,6 +267,11 @@ const Actions = ({ machine }: { readonly machine: Machine }) => {
             Resize
           </Button>
         ) : null}
+        {state !== "Deleting" ? (
+          <Button onClick={() => setChangingIdentity(true)} leadingIcon={<Icon name="shield" size={12} />}>
+            Identity
+          </Button>
+        ) : null}
         <Button
           variant="ghost"
           disabled={state === "Deleting"}
@@ -213,6 +286,7 @@ const Actions = ({ machine }: { readonly machine: Machine }) => {
       {deleting ? <DeleteDialog machine={machine} onClose={() => setDeleting(false)} /> : null}
       {ejecting ? <EjectDialog machine={machine} onClose={() => setEjecting(false)} /> : null}
       {resizing ? <ResizeDialog machine={machine} onClose={() => setResizing(false)} /> : null}
+      {changingIdentity ? <IdentityDialog machine={machine} onClose={() => setChangingIdentity(false)} /> : null}
     </div>
   );
 };
@@ -272,6 +346,9 @@ const Overview = ({ machine }: { readonly machine: Machine }) => {
               ...(machine.profile ? ([["OS profile", profileLabel(machine.profile)]] as [string, React.ReactNode][]) : []),
               ["Size", `${formatCpu(machine.cpu)} · ${formatMemory(machine.memoryMiB)}`],
               ["Disk", `${machine.diskGiB} GiB`],
+              ...(machine.identity
+                ? ([["Identity", <Link key="identity" href="/identities/" className="underline-offset-2 hover:underline">{machine.identity}</Link>]] as [string, React.ReactNode][])
+                : []),
               ...(user && !windows
                 ? ([["User", <span key="user" className="font-mono text-xs">{user}</span>]] as [string, React.ReactNode][])
                 : []),

@@ -158,50 +158,6 @@ func New(ctx context.Context, cfg *rest.Config, namespace string, catalog *confi
 	return s, nil
 }
 
-// ensureIdentities gives machines from before identities theirs: the service account, and the
-// volume that has the launcher pod run as it. It takes effect at the machine's next start. Both
-// steps are idempotent, so running it at every start is harmless.
-func (s *Service) ensureIdentities(ctx context.Context) {
-	var list kubevirtv1.VirtualMachineList
-	if err := s.read.List(ctx, &list, client.InNamespace(s.Namespace), client.HasLabels{LabelMachine}); err != nil {
-		s.log.Warn("listing machines for their identities", "err", err)
-		return
-	}
-	for i := range list.Items {
-		vm := &list.Items[i]
-		if !idFormat.MatchString(vm.Name) {
-			continue
-		}
-		if err := s.write.Create(ctx, buildServiceAccount(vm)); err != nil && !apierrors.IsAlreadyExists(err) {
-			s.log.Warn("creating a machine's identity", "id", vm.Name, "err", err)
-			continue
-		}
-		if hasVolume(vm, volumeIdentity) {
-			continue
-		}
-		for attempt := 0; ; attempt++ {
-			var live kubevirtv1.VirtualMachine // fresh: the update is conditional on it
-			if err := s.write.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: vm.Name}, &live); err != nil {
-				s.log.Warn("reading a machine for its identity", "id", vm.Name, "err", err)
-				break
-			}
-			if hasVolume(&live, volumeIdentity) {
-				break
-			}
-			live.Spec.Template.Spec.Volumes = append(live.Spec.Template.Spec.Volumes, identityVolume(live.Name))
-			err := s.write.Update(ctx, &live)
-			if err == nil {
-				s.log.Info("machine given its identity (at its next start)", "id", live.Name)
-				break
-			}
-			if !apierrors.IsConflict(err) || attempt == 3 {
-				s.log.Warn("giving a machine its identity", "id", live.Name, "err", err)
-				break
-			}
-		}
-	}
-}
-
 func (s *Service) disk(ctx context.Context, id string) *cdiv1.DataVolume {
 	var dv cdiv1.DataVolume
 	if s.read.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: diskName(id)}, &dv) != nil {
@@ -241,14 +197,22 @@ func (s *Service) vmGone(o any) {
 	if vm == nil || !idFormat.MatchString(vm.Name) {
 		return
 	}
-	go func() { // off the informer's goroutine: a slow database mustn't hold up everyone's live state
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := s.store.DeleteMachine(ctx, vm.Name); err != nil {
-			s.log.Error("removing a deleted machine's row", "id", vm.Name, "err", err)
-		}
-		s.changed(vm)
-	}()
+	go s.removeRow(vm) // off the informer's goroutine: a slow database mustn't hold up everyone's live state
+}
+
+// removeRow removes a deleted VM's row, and its identity if it was to go with it.
+func (s *Service) removeRow(vm *kubevirtv1.VirtualMachine) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	gone, err := s.store.DeleteMachine(ctx, vm.Name)
+	if err != nil {
+		s.log.Error("removing a deleted machine's row", "id", vm.Name, "err", err)
+	}
+	if gone != "" {
+		s.deleteIdentityAccount(ctx, gone)
+		s.log.Info("identity deleted with its machine", "id", vm.Name, "account", gone)
+	}
+	s.changed(vm)
 }
 
 func (s *Service) diskChanged(o any) {
@@ -460,30 +424,61 @@ func (s *Service) Create(ctx context.Context, a Actor, r Request) (Machine, erro
 		}
 		r.OwnerName, r.UID = a.Username, member.UID
 	}
+	// The identity it wears: one of the member's by name, or a new one named after it, which goes
+	// again if the machine isn't made.
+	newIdentity := ""
+	dropNewIdentity := func() {
+		if newIdentity != "" && s.store.DeleteIdentity(ctx, newIdentity) == nil {
+			s.deleteIdentityAccount(ctx, newIdentity)
+		}
+	}
+	if r.Identity != "" {
+		if r.identity = s.ownIdentity(ctx, a.Owner, r.Identity); r.identity == "" {
+			return Machine{}, refuse(http.StatusBadRequest, "You have no identity named %q.", r.Identity)
+		}
+	} else {
+		if s.ownIdentity(ctx, a.Owner, r.Name) != "" {
+			return Machine{}, refuse(http.StatusConflict, "You already have an identity named %s: choose it for this machine, or name the machine differently.", r.Name)
+		}
+		i, err := s.newIdentity(ctx, a.Owner, r.Name)
+		if err != nil {
+			return Machine{}, err
+		}
+		r.identity, newIdentity = i.Account, i.Account
+	}
 	check := s.within(a, store.Usage{VMs: 1, CPU: r.Size.CPU, MemoryMiB: r.Size.MemoryMiB, DiskGiB: r.DiskGiB})
 	var row store.Machine
 	for attempt := 0; ; attempt++ {
-		row = store.Machine{ID: newID(), Owner: a.Owner, Name: r.Name, Image: ref.Name, Size: r.Size.ID, CPU: r.Size.CPU, MemoryMiB: r.Size.MemoryMiB, DiskGiB: r.DiskGiB, Media: ref.ID, Profile: r.profile}
+		row = store.Machine{ID: newID(), Owner: a.Owner, Name: r.Name, Image: ref.Name, Size: r.Size.ID, CPU: r.Size.CPU, MemoryMiB: r.Size.MemoryMiB, DiskGiB: r.DiskGiB, Media: ref.ID, Profile: r.profile, Identity: r.identity}
 		err := s.store.CreateMachine(ctx, row, check)
 		var le *store.LimitError
 		switch {
 		case err == nil:
 		case errors.As(err, &le):
+			dropNewIdentity()
 			return Machine{}, refuse(http.StatusForbidden, "%s", le.Message)
 		case errors.Is(err, store.ErrExists):
 			if _, nerr := s.store.MachineByName(ctx, r.Name); nerr == nil {
+				dropNewIdentity()
 				return Machine{}, refuse(http.StatusConflict, "Another machine already has this name.")
 			}
 			if attempt < 3 {
 				continue // the id was taken
 			}
+			dropNewIdentity()
 			return Machine{}, s.storeError("saving the machine", err)
+		case errors.Is(err, store.ErrNoIdentity):
+			return Machine{}, refuse(http.StatusConflict, "That identity was just deleted; choose another.")
 		default:
+			dropNewIdentity()
 			return Machine{}, s.storeError("saving the machine", err)
 		}
 		break
 	}
-	row.CreatedAt, row.OwnerName = time.Now(), a.Username
+	row.CreatedAt, row.OwnerName, row.IdentityName = time.Now(), a.Username, r.Identity
+	if newIdentity != "" {
+		row.IdentityName = r.Name
+	}
 
 	// From here the machine is the member's; the rest finishes even if they go away (one deadline
 	// covers it). The VM is created with run strategy Manual (not running), then its cloud-init
@@ -496,16 +491,13 @@ func (s *Service) Create(ctx context.Context, a Actor, r Request) (Machine, erro
 		var live kubevirtv1.VirtualMachine
 		if gerr := s.write.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: row.ID}, &live); apierrors.IsNotFound(gerr) {
 			s.store.DeleteMachine(ctx, row.ID)
+			dropNewIdentity()
 		}
 		return Machine{}, s.kubeError(what, err)
 	}
 	vm := buildVM(s.Namespace, row.ID, a.Owner, s.Catalog.StorageClass, r)
 	if err := s.write.Create(ctx, vm); err != nil {
 		return abandon("creating the machine", err)
-	}
-	if err := s.write.Create(ctx, buildServiceAccount(vm)); err != nil && !apierrors.IsAlreadyExists(err) {
-		s.write.Delete(ctx, vm) // the watch then removes the row
-		return Machine{}, s.kubeError("creating the machine's identity", err)
 	}
 	if hasVolume(vm, "cloudinit") {
 		userData, err := cloudConfig(r.Name, r)
@@ -652,7 +644,7 @@ func (s *Service) Action(ctx context.Context, a Actor, id, action string) error 
 
 // Delete deletes the machine's VM (its disk and cloud-init Secret go with it); the watch removes the
 // row once the VM is gone. A machine whose VM is already missing loses its row here.
-func (s *Service) Delete(ctx context.Context, a Actor, id string) error {
+func (s *Service) Delete(ctx context.Context, a Actor, id string, withIdentity bool) error {
 	row, vm, err := s.get(ctx, a, id)
 	if err != nil {
 		return err
@@ -671,13 +663,26 @@ func (s *Service) Delete(ctx context.Context, a Actor, id string) error {
 		case time.Since(row.CreatedAt) < missingGrace:
 			return refuse(http.StatusConflict, "The machine is still being created; try again in a moment.")
 		default:
-			if err := s.store.DeleteMachine(ctx, id); err != nil {
+			if withIdentity {
+				s.store.MarkDeleteIdentity(ctx, id)
+			}
+			gone, err := s.store.DeleteMachine(ctx, id)
+			if err != nil {
 				return s.storeError("deleting the machine", err)
+			}
+			if gone != "" {
+				s.deleteIdentityAccount(ctx, gone)
 			}
 			s.hub.publish(change{owner: row.Owner, id: id})
 		}
 	}
 	if vm != nil {
+		// The identity goes with the row, which the VM watch removes once the VM is gone.
+		if withIdentity {
+			if err := s.store.MarkDeleteIdentity(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return s.storeError("marking the identity to go", err)
+			}
+		}
 		if err := s.write.Delete(ctx, vm, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
 			return s.kubeError("deleting the machine", err)
 		}

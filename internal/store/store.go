@@ -24,18 +24,22 @@ import (
 
 // Machine is a machine's row: its owner and what it was made with.
 type Machine struct {
-	ID        string
-	Owner     string
-	Name      string
-	Image     string
-	Size      string
-	CPU       int
-	MemoryMiB int
-	DiskGiB   int
-	Media     string // the image it was made from ("" for machines from before images)
-	Profile   string // the device profile it got from its image
-	CreatedAt time.Time
-	OwnerName string // the owner's username (read only, from members)
+	ID           string
+	Owner        string
+	Name         string
+	Image        string
+	Size         string
+	CPU          int
+	MemoryMiB    int
+	DiskGiB      int
+	Media        string // the image it was made from ("" for machines from before images)
+	Profile      string // the device profile it got from its image
+	Identity     string // the account of the identity it wears ("" only for machines from before identities)
+	IdentityName string // read only: that identity's name
+	// DeleteIdentity: its identity goes when its row does, if no other machine wears it then.
+	DeleteIdentity bool
+	CreatedAt      time.Time
+	OwnerName      string // the owner's username (read only, from members)
 }
 
 // Quota is a member's limits; nil fields mean the default.
@@ -88,6 +92,16 @@ type Key struct {
 	CreatedAt time.Time
 }
 
+// Identity is what machines are to other services: a ServiceAccount (Account) that machines wear.
+type Identity struct {
+	Account   string // identity-<name>-<random>; never reused
+	Owner     string
+	Name      string
+	CreatedAt time.Time
+	OwnerName string   // read only, from members
+	UsedBy    []string // read only: the names of the machines that wear it
+}
+
 // Usage is what an owner's machines add up to.
 type Usage struct {
 	VMs       int `json:"vms"`
@@ -101,6 +115,10 @@ var (
 	ErrNotFound = errors.New("not found")
 	// ErrExists: the primary key is taken.
 	ErrExists = errors.New("already exists")
+	// ErrInUse: an identity a machine wears.
+	ErrInUse = errors.New("in use")
+	// ErrNoIdentity: the identity named is not the machine owner's (or doesn't exist).
+	ErrNoIdentity = errors.New("no such identity of the owner")
 )
 
 // LimitError is a create refused because it would go over a limit.
@@ -117,9 +135,21 @@ type Store interface {
 	// SignedInAt is the member's last sign-in.
 	SignedInAt(ctx context.Context, owner string) (time.Time, error)
 	// CreateMachine inserts m if the owner's machines plus m stay within check's limits; check
-	// returns a *LimitError when they wouldn't. ErrExists if the ID or name is taken, or the ID was
-	// a deleted machine's (IDs are never reused).
+	// returns a *LimitError when they wouldn't. ErrExists if the ID or name is taken; ErrNoIdentity
+	// if m.Identity is not the owner's.
 	CreateMachine(ctx context.Context, m Machine, check func(Usage, Quota) error) error
+	// SetMachineIdentity has the machine wear another identity of its owner's (ErrNoIdentity).
+	SetMachineIdentity(ctx context.Context, id, account string) error
+	// MarkDeleteIdentity has the machine's identity go with its row (DeleteMachine).
+	MarkDeleteIdentity(ctx context.Context, id string) error
+	// CreateIdentity inserts i if the owner has fewer than max; ErrExists if the owner has one by
+	// that name or the account is (or was) taken; *LimitError over max.
+	CreateIdentity(ctx context.Context, i Identity, max int) error
+	// DeleteIdentity removes and retires an identity; ErrInUse while a machine wears it.
+	DeleteIdentity(ctx context.Context, account string) error
+	Identity(ctx context.Context, account string) (Identity, error)
+	Identities(ctx context.Context, owner string) ([]Identity, error)
+	AllIdentities(ctx context.Context) ([]Identity, error)
 	// ResizeMachine sets machine id's size if the owner's other machines plus it at that size stay
 	// within check's limits; check returns a *LimitError when they wouldn't. ErrNotFound if no machine.
 	ResizeMachine(ctx context.Context, id, size string, cpu, memoryMiB int, check func(Usage, Quota) error) error
@@ -138,7 +168,9 @@ type Store interface {
 	Machine(ctx context.Context, id string) (Machine, error)
 	Machines(ctx context.Context, owner string) ([]Machine, error)
 	Usage(ctx context.Context, owner string) (Usage, error)
-	DeleteMachine(ctx context.Context, id string) error
+	// DeleteMachine removes the row; if it was marked so and no other machine wears its identity,
+	// the identity too, whose account it returns (for its ServiceAccount to be deleted).
+	DeleteMachine(ctx context.Context, id string) (deletedIdentity string, err error)
 	// AddKey inserts k if the owner has fewer than max keys; ErrExists if anyone has it.
 	AddKey(ctx context.Context, k Key, max int) error
 	Key(ctx context.Context, id string) (Key, error)
@@ -241,6 +273,11 @@ func (p *Postgres) serializable(ctx context.Context, fn func(pgx.Tx) error) erro
 	}
 }
 
+func isForeignKeyViolation(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "23503"
+}
+
 func isUniqueViolation(err error) bool {
 	var pe *pgconn.PgError
 	return errors.As(err, &pe) && pe.Code == "23505"
@@ -287,15 +324,11 @@ func (p *Postgres) CreateMachine(ctx context.Context, m Machine, check func(Usag
 		if err := check(u, q); err != nil {
 			return err
 		}
-		var retired bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM retired_machine_ids WHERE id = $1)`, m.ID).Scan(&retired); err != nil {
+		if err := identityOf(ctx, tx, m.Identity, m.Owner); err != nil {
 			return err
 		}
-		if retired {
-			return ErrExists // the caller draws another ID
-		}
-		_, err = tx.Exec(ctx, `INSERT INTO machines (id, owner, name, image, size, cpu, memory_mib, disk_gib, media, profile) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-			m.ID, m.Owner, m.Name, m.Image, m.Size, m.CPU, m.MemoryMiB, m.DiskGiB, m.Media, m.Profile)
+		_, err = tx.Exec(ctx, `INSERT INTO machines (id, owner, name, image, size, cpu, memory_mib, disk_gib, media, profile, identity) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULLIF($11, ''))`,
+			m.ID, m.Owner, m.Name, m.Image, m.Size, m.CPU, m.MemoryMiB, m.DiskGiB, m.Media, m.Profile, m.Identity)
 		if isUniqueViolation(err) {
 			return ErrExists
 		}
@@ -330,12 +363,131 @@ func (p *Postgres) ResizeMachine(ctx context.Context, id, size string, cpu, memo
 	})
 }
 
-const machineSelect = `SELECT m.id, m.owner, m.name, m.image, m.size, m.cpu, m.memory_mib, m.disk_gib, m.media, m.profile, m.created_at, coalesce(u.username, '')
-	FROM machines m LEFT JOIN members u ON u.owner = m.owner `
+// identityOf checks that account is an identity of owner's ("" is: none, for tests of machines from
+// before identities).
+func identityOf(ctx context.Context, tx pgx.Tx, account, owner string) error {
+	if account == "" {
+		return nil
+	}
+	var o string
+	err := tx.QueryRow(ctx, `SELECT owner FROM identities WHERE account = $1`, account).Scan(&o)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && o != owner) {
+		return ErrNoIdentity
+	}
+	return err
+}
+
+func (p *Postgres) SetMachineIdentity(ctx context.Context, id, account string) error {
+	return p.serializable(ctx, func(tx pgx.Tx) error {
+		var owner string
+		err := tx.QueryRow(ctx, `SELECT owner FROM machines WHERE id = $1`, id).Scan(&owner)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if account == "" {
+			return ErrNoIdentity
+		}
+		if err := identityOf(ctx, tx, account, owner); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE machines SET identity = $2 WHERE id = $1`, id, account)
+		return err
+	})
+}
+
+func (p *Postgres) MarkDeleteIdentity(ctx context.Context, id string) error {
+	tag, err := p.pool.Exec(ctx, `UPDATE machines SET delete_identity = true WHERE id = $1`, id)
+	if err == nil && tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return err
+}
+
+func (p *Postgres) CreateIdentity(ctx context.Context, i Identity, max int) error {
+	return p.serializable(ctx, func(tx pgx.Tx) error {
+		var n int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM identities WHERE owner = $1`, i.Owner).Scan(&n); err != nil {
+			return err
+		}
+		if n >= max {
+			return &LimitError{Message: fmt.Sprintf("You have %d identities, the most there may be.", n)}
+		}
+		var retired bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM retired_identities WHERE account = $1)`, i.Account).Scan(&retired); err != nil {
+			return err
+		}
+		if retired {
+			return ErrExists
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO identities (account, owner, name) VALUES ($1, $2, $3)`, i.Account, i.Owner, i.Name)
+		if isUniqueViolation(err) {
+			return ErrExists
+		}
+		return err
+	})
+}
+
+func (p *Postgres) DeleteIdentity(ctx context.Context, account string) error {
+	return p.serializable(ctx, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `DELETE FROM identities WHERE account = $1`, account)
+		if isForeignKeyViolation(err) {
+			return ErrInUse
+		}
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO retired_identities (account) VALUES ($1) ON CONFLICT DO NOTHING`, account)
+		return err
+	})
+}
+
+const identitySelect = `SELECT i.account, i.owner, i.name, i.created_at, coalesce(u.username, ''),
+	coalesce(array_agg(m.name ORDER BY m.name) FILTER (WHERE m.id IS NOT NULL), '{}')
+	FROM identities i LEFT JOIN members u ON u.owner = i.owner LEFT JOIN machines m ON m.identity = i.account `
+
+func (p *Postgres) identities(ctx context.Context, where string, args ...any) ([]Identity, error) {
+	rows, err := p.pool.Query(ctx, identitySelect+where+` GROUP BY i.account, u.username ORDER BY i.created_at`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (Identity, error) {
+		var i Identity
+		err := r.Scan(&i.Account, &i.Owner, &i.Name, &i.CreatedAt, &i.OwnerName, &i.UsedBy)
+		return i, err
+	})
+}
+
+func (p *Postgres) Identity(ctx context.Context, account string) (Identity, error) {
+	list, err := p.identities(ctx, `WHERE i.account = $1`, account)
+	if err == nil && len(list) == 0 {
+		return Identity{}, ErrNotFound
+	}
+	if err != nil {
+		return Identity{}, err
+	}
+	return list[0], nil
+}
+
+func (p *Postgres) Identities(ctx context.Context, owner string) ([]Identity, error) {
+	return p.identities(ctx, `WHERE i.owner = $1`, owner)
+}
+
+func (p *Postgres) AllIdentities(ctx context.Context) ([]Identity, error) {
+	return p.identities(ctx, ``)
+}
+
+const machineSelect = `SELECT m.id, m.owner, m.name, m.image, m.size, m.cpu, m.memory_mib, m.disk_gib, m.media, m.profile, coalesce(m.identity, ''), coalesce(i.name, ''), m.delete_identity, m.created_at, coalesce(u.username, '')
+	FROM machines m LEFT JOIN members u ON u.owner = m.owner LEFT JOIN identities i ON i.account = m.identity `
 
 func scanMachine(row pgx.Row) (Machine, error) {
 	var m Machine
-	err := row.Scan(&m.ID, &m.Owner, &m.Name, &m.Image, &m.Size, &m.CPU, &m.MemoryMiB, &m.DiskGiB, &m.Media, &m.Profile, &m.CreatedAt, &m.OwnerName)
+	err := row.Scan(&m.ID, &m.Owner, &m.Name, &m.Image, &m.Size, &m.CPU, &m.MemoryMiB, &m.DiskGiB, &m.Media, &m.Profile, &m.Identity, &m.IdentityName, &m.DeleteIdentity, &m.CreatedAt, &m.OwnerName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -411,16 +563,30 @@ func (p *Postgres) Usage(ctx context.Context, owner string) (Usage, error) {
 	return scanUsage(p.pool.QueryRow(ctx, usageQuery, owner))
 }
 
-// DeleteMachine removes the row and retires its ID, in one transaction.
-func (p *Postgres) DeleteMachine(ctx context.Context, id string) error {
-	return p.serializable(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `DELETE FROM machines WHERE id = $1`, id)
-		if err != nil || tag.RowsAffected() == 0 {
+func (p *Postgres) DeleteMachine(ctx context.Context, id string) (string, error) {
+	var gone string
+	err := p.serializable(ctx, func(tx pgx.Tx) error {
+		gone = ""
+		var identity *string
+		var withIt bool
+		err := tx.QueryRow(ctx, `DELETE FROM machines WHERE id = $1 RETURNING identity, delete_identity`, id).Scan(&identity, &withIt)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil || !withIt || identity == nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO retired_machine_ids (id) VALUES ($1) ON CONFLICT DO NOTHING`, id)
-		return err
+		tag, err := tx.Exec(ctx, `DELETE FROM identities WHERE account = $1 AND NOT EXISTS (SELECT 1 FROM machines WHERE identity = $1)`, *identity)
+		if err != nil || tag.RowsAffected() == 0 {
+			return err // another machine wears it: it stays
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO retired_identities (account) VALUES ($1) ON CONFLICT DO NOTHING`, *identity); err != nil {
+			return err
+		}
+		gone = *identity
+		return nil
 	})
+	return gone, err
 }
 
 func (p *Postgres) AddKey(ctx context.Context, k Key, max int) error {

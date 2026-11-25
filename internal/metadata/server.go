@@ -16,8 +16,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// MachineID is the form of a machine's ID, which is also its service account's name.
-var MachineID = regexp.MustCompile(`^vm-[a-km-np-z2-9]{6}$`)
+// IdentityAccount is the form of an identity's service account (package machines makes them).
+var IdentityAccount = regexp.MustCompile(`^identity-[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?-[a-km-np-z2-9]{8}$`)
 
 // Minted is a token the API server gave for a machine.
 type Minted struct {
@@ -29,7 +29,10 @@ type Minted struct {
 type Server struct {
 	Namespace string
 	Issuer    string // the cluster's, which is also what the minted tokens say
-	Verifier  *oidc.IDTokenVerifier
+	// RefusedAudiences are the API server's (k0s --api-audiences): a token made out to one would
+	// work against the cluster, and could be used to get more. The admission policy refuses them too.
+	RefusedAudiences []string
+	Verifier         *oidc.IDTokenVerifier
 	// Pod is a launcher pod from the informer's cache.
 	Pod func(name string) (*corev1.Pod, bool)
 	// Mint asks the API server for a token of the service account, bound to the pod.
@@ -97,14 +100,14 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "The relay's token is not accepted.")
 		return
 	}
-	machine, podName, podUID := c.K.ServiceAccount.Name, c.K.Pod.Name, c.K.Pod.UID
-	// The token must be a launcher pod's, alive now, running as that machine's service account.
+	account, podName, podUID := c.K.ServiceAccount.Name, c.K.Pod.Name, c.K.Pod.UID
+	// The token must be a launcher pod's, alive now, running as an identity's service account (which
+	// only VMService sets, to one its owner owns).
 	pod, found := s.Pod(podName)
-	if c.K.Namespace != s.Namespace || !MachineID.MatchString(machine) || !found || string(pod.UID) != podUID ||
-		pod.Labels["kubevirt.io"] != "virt-launcher" || pod.Labels["vm.kubevirt.io/name"] != machine ||
-		pod.Spec.ServiceAccountName != machine || pod.DeletionTimestamp != nil {
-		s.Log.Info("relay token names no live machine pod", "machine", machine, "pod", podName)
-		fail(w, http.StatusUnauthorized, "The relay's token names no running machine.")
+	if c.K.Namespace != s.Namespace || !IdentityAccount.MatchString(account) || !found || string(pod.UID) != podUID ||
+		pod.Labels["kubevirt.io"] != "virt-launcher" || pod.Spec.ServiceAccountName != account || pod.DeletionTimestamp != nil {
+		s.Log.Info("relay token names no live machine pod with an identity", "account", account, "pod", podName)
+		fail(w, http.StatusUnauthorized, "The relay's token names no running machine with an identity.")
 		return
 	}
 	aud := r.URL.Query()["audience"]
@@ -113,10 +116,16 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	audience := aud[0]
+	for _, refused := range s.RefusedAudiences {
+		if audience == refused {
+			fail(w, http.StatusBadRequest, "Tokens can't be made out to the cluster's API server.")
+			return
+		}
+	}
 	v, _ := s.cache.LoadOrStore(podUID, &podTokens{})
 	pt := v.(*podTokens)
 	if m, ok := pt.tokens.Load(audience); ok && m.(Minted).Expires.Sub(s.Now()) > renewBefore {
-		s.answer(w, m.(Minted), machine)
+		s.answer(w, m.(Minted), account)
 		return
 	}
 	if _, kept := pt.tokens.Load(audience); !kept {
@@ -126,24 +135,24 @@ func (s *Server) token(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	m, err := s.Mint(r.Context(), machine, pod, audience)
+	m, err := s.Mint(r.Context(), account, pod, audience)
 	if err != nil {
-		s.Log.Warn("minting a machine token", "machine", machine, "err", err)
+		s.Log.Warn("minting a machine token", "account", account, "err", err)
 		fail(w, http.StatusServiceUnavailable, "A token can't be made right now; try again.")
 		return
 	}
 	// Two requests at once may both mint; either token is good, and the later one is kept.
 	pt.tokens.Store(audience, m)
-	s.answer(w, m, machine)
+	s.answer(w, m, account)
 }
 
-func (s *Server) answer(w http.ResponseWriter, m Minted, machine string) {
+func (s *Server) answer(w http.ResponseWriter, m Minted, account string) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"token":     m.Token,
 		"expiresIn": int(m.Expires.Sub(s.Now()).Seconds()),
 		"issuer":    s.Issuer,
-		"subject":   "system:serviceaccount:" + s.Namespace + ":" + machine,
+		"subject":   "system:serviceaccount:" + s.Namespace + ":" + account,
 	})
 }
 

@@ -25,6 +25,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+const ACC = "identity-build-aaaaaaaa"
+
 const (
 	issuer   = "https://kubernetes.example"
 	audience = "https://metadata.example"
@@ -65,11 +67,11 @@ func (s *signer) relayToken(t *testing.T, namespace, sa, pod, uid string) string
 	return raw
 }
 
-func launcher(name, uid, machine string) *corev1.Pod {
+func launcher(name, uid, account string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID(uid),
-			Labels: map[string]string{"kubevirt.io": "virt-launcher", "vm.kubevirt.io/name": machine}},
-		Spec: corev1.PodSpec{ServiceAccountName: machine},
+			Labels: map[string]string{"kubevirt.io": "virt-launcher", "vm.kubevirt.io/name": "vm-abcdef"}},
+		Spec: corev1.PodSpec{ServiceAccountName: account},
 	}
 }
 
@@ -77,7 +79,7 @@ func testServer(t *testing.T, s *signer, pods ...*corev1.Pod) (*Server, *atomic.
 	keys := &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{&s.key.PublicKey}}
 	mints := new(atomic.Int32)
 	srv := &Server{
-		Namespace: ns, Issuer: issuer,
+		Namespace: ns, Issuer: issuer, RefusedAudiences: []string{"https://kubernetes.default.svc"},
 		Verifier: oidc.NewVerifier(issuer, keys, &oidc.Config{ClientID: audience}),
 		Pod: func(name string) (*corev1.Pod, bool) {
 			for _, p := range pods {
@@ -111,12 +113,12 @@ func ask(h http.Handler, bearer, aud string) (int, map[string]any) {
 
 func TestServerMintsForTheMachinesLivePod(t *testing.T) {
 	s := newSigner(t)
-	srv, mints := testServer(t, s, launcher("virt-launcher-vm-abcdef-x", "uid-1", "vm-abcdef"))
+	srv, mints := testServer(t, s, launcher("virt-launcher-vm-abcdef-x", "uid-1", ACC))
 	h := srv.Handler()
-	good := s.relayToken(t, ns, "vm-abcdef", "virt-launcher-vm-abcdef-x", "uid-1")
+	good := s.relayToken(t, ns, ACC, "virt-launcher-vm-abcdef-x", "uid-1")
 
 	code, body := ask(h, good, "https://files.example")
-	if code != 200 || body["token"] != "vm-abcdef|uid-1|https://files.example" || body["subject"] != "system:serviceaccount:cloud:vm-abcdef" {
+	if code != 200 || body["token"] != ACC+"|uid-1|https://files.example" || body["subject"] != "system:serviceaccount:cloud:"+ACC {
 		t.Fatalf("good request = %d %v", code, body)
 	}
 	if code, _ := ask(h, good, "https://files.example"); code != 200 || mints.Load() != 1 {
@@ -130,18 +132,18 @@ func TestServerMintsForTheMachinesLivePod(t *testing.T) {
 	for name, bearer := range map[string]string{
 		"no token":               "",
 		"garbage":                "not-a-jwt",
-		"other namespace":        s.relayToken(t, "elsewhere", "vm-abcdef", "virt-launcher-vm-abcdef-x", "uid-1"),
-		"pod gone (other uid)":   s.relayToken(t, ns, "vm-abcdef", "virt-launcher-vm-abcdef-x", "uid-old"),
-		"no such pod":            s.relayToken(t, ns, "vm-abcdef", "virt-launcher-vm-zzzzzz-y", "uid-1"),
-		"another machine's sa":   s.relayToken(t, ns, "vm-ghjkmn", "virt-launcher-vm-abcdef-x", "uid-1"),
-		"not a machine's sa":     s.relayToken(t, ns, "vmservice", "virt-launcher-vm-abcdef-x", "uid-1"),
-		"signed by someone else": newSigner(t).relayToken(t, ns, "vm-abcdef", "virt-launcher-vm-abcdef-x", "uid-1"),
+		"other namespace":        s.relayToken(t, "elsewhere", ACC, "virt-launcher-vm-abcdef-x", "uid-1"),
+		"pod gone (other uid)":   s.relayToken(t, ns, ACC, "virt-launcher-vm-abcdef-x", "uid-old"),
+		"no such pod":            s.relayToken(t, ns, ACC, "virt-launcher-vm-zzzzzz-y", "uid-1"),
+		"another identity's sa":  s.relayToken(t, ns, "identity-other-bbbbbbbb", "virt-launcher-vm-abcdef-x", "uid-1"),
+		"not an identity's sa":   s.relayToken(t, ns, "vmservice", "virt-launcher-vm-abcdef-x", "uid-1"),
+		"signed by someone else": newSigner(t).relayToken(t, ns, ACC, "virt-launcher-vm-abcdef-x", "uid-1"),
 	} {
 		if code, _ := ask(h, bearer, "https://files.example"); code != http.StatusUnauthorized {
 			t.Errorf("%s = %d, want 401", name, code)
 		}
 	}
-	for _, aud := range []string{"", "a%0Ab", strings.Repeat("a", 257)} {
+	for _, aud := range []string{"", "a%0Ab", strings.Repeat("a", 257), "https://kubernetes.default.svc"} {
 		if code, _ := ask(h, good, aud); code != http.StatusBadRequest {
 			t.Errorf("audience %q = %d, want 400", aud, code)
 		}
@@ -150,9 +152,9 @@ func TestServerMintsForTheMachinesLivePod(t *testing.T) {
 
 func TestServerCapsAudiencesPerPod(t *testing.T) {
 	s := newSigner(t)
-	srv, _ := testServer(t, s, launcher("p", "uid-1", "vm-abcdef"))
+	srv, _ := testServer(t, s, launcher("p", "uid-1", ACC))
 	h := srv.Handler()
-	good := s.relayToken(t, ns, "vm-abcdef", "p", "uid-1")
+	good := s.relayToken(t, ns, ACC, "p", "uid-1")
 	for i := 0; i < maxAudiences; i++ {
 		if code, _ := ask(h, good, "aud"+string(rune('a'+i))); code != 200 {
 			t.Fatalf("audience %d = %d", i, code)

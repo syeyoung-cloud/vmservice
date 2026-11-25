@@ -33,6 +33,23 @@ export type Machine = {
   readonly profile?: string;
   /** The install CD-ROMs (ISO, drivers) are still attached; "eject" removes them. */
   readonly installMedia?: boolean;
+  /** The name of the identity it wears (what it is to other services). */
+  readonly identity?: string;
+  readonly identityAccount?: string;
+};
+
+/** What machines are to other services: a service account machines wear (several may wear one). */
+export type Identity = {
+  readonly name: string;
+  readonly account: string;
+  readonly subject: string;
+  readonly issuer: string;
+  /** The owner's username. */
+  readonly owner: string;
+  readonly mine: boolean;
+  /** Names of the machines that wear it. */
+  readonly usedBy: readonly string[];
+  readonly createdAt: string;
 };
 
 export type CatalogSize = { readonly id: string; readonly name: string; readonly cpu: number; readonly memoryMiB: number };
@@ -70,6 +87,8 @@ export type NewMachineRequest = {
   readonly size: string;
   readonly diskGiB: number;
   readonly password: string;
+  /** One of the member's identities by name; absent or "": a new one, named after the machine. */
+  readonly identity?: string;
 };
 
 export type ImageKind = "iso" | "disk" | "";

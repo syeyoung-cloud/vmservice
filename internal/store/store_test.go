@@ -25,7 +25,7 @@ func stores(t *testing.T) map[string]Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := conn.Exec(ctx, `DROP TABLE IF EXISTS retired_machine_ids, media, ssh_keys, machines, members, schema_migrations`); err != nil {
+	if _, err := conn.Exec(ctx, `DROP TABLE IF EXISTS retired_identities, media, ssh_keys, machines, identities, members, schema_migrations`); err != nil {
 		t.Fatal(err)
 	}
 	conn.Close(ctx)
@@ -90,12 +90,7 @@ func TestMachines(t *testing.T) {
 			if _, err := s.Machine(ctx, "vm-aaaaaa"); !errors.Is(err, ErrNotFound) {
 				t.Errorf("after delete = %v", err)
 			}
-			if err := s.CreateMachine(ctx, Machine{ID: "vm-aaaaaa", Owner: "alice", Name: "box2"}, limit2); !errors.Is(err, ErrExists) {
-				t.Errorf("reusing a deleted machine's ID = %v, want ErrExists (IDs are never reused)", err)
-			}
-			if err := s.CreateMachine(ctx, Machine{ID: "vm-aaaaab", Owner: "alice", Name: "box"}, limit2); err != nil {
-				t.Errorf("reusing a deleted machine's name = %v (names are free again)", err)
-			}
+
 		})
 	}
 }
@@ -150,6 +145,73 @@ func TestResizeMachine(t *testing.T) {
 			wg.Wait()
 			if u, _ := s.Usage(ctx, "dave"); u.CPU != 4 {
 				t.Errorf("two parallel resizes left %d vCPUs in use; the limit is 4", u.CPU)
+			}
+		})
+	}
+}
+
+// Identities: owned, worn by machines, not deletable while worn, never made again once deleted.
+func TestIdentities(t *testing.T) {
+	for name, s := range stores(t) {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			s.UpsertMember(ctx, "erin", "erin")
+			s.UpsertMember(ctx, "fred", "fred")
+			a := Identity{Account: "identity-build-aaaaaaaa", Owner: "erin", Name: "build"}
+			if err := s.CreateIdentity(ctx, a, 2); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CreateIdentity(ctx, Identity{Account: "identity-build-bbbbbbbb", Owner: "erin", Name: "build"}, 2); !errors.Is(err, ErrExists) {
+				t.Errorf("a second identity named build = %v, want ErrExists", err)
+			}
+			if err := s.CreateIdentity(ctx, Identity{Account: "identity-build-cccccccc", Owner: "fred", Name: "build"}, 2); err != nil {
+				t.Errorf("another member's identity of the same name = %v", err)
+			}
+			s.CreateIdentity(ctx, Identity{Account: "identity-two-dddddddd", Owner: "erin", Name: "two"}, 2)
+			var le *LimitError
+			if err := s.CreateIdentity(ctx, Identity{Account: "identity-three-eeeeeeee", Owner: "erin", Name: "three"}, 2); !errors.As(err, &le) {
+				t.Errorf("over the most = %v, want a LimitError", err)
+			}
+			if err := s.CreateMachine(ctx, Machine{ID: "vm-e00001", Owner: "erin", Name: "e1", Identity: "identity-build-cccccccc"}, limit2); !errors.Is(err, ErrNoIdentity) {
+				t.Errorf("wearing fred's identity = %v, want ErrNoIdentity", err)
+			}
+			for _, id := range []string{"vm-e00001", "vm-e00002"} {
+				if err := s.CreateMachine(ctx, Machine{ID: id, Owner: "erin", Name: id[3:], Identity: a.Account}, limit2); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, _ := s.Identity(ctx, a.Account); len(got.UsedBy) != 2 || got.UsedBy[0] != "e00001" || got.OwnerName != "erin" {
+				t.Errorf("identity = %+v", got)
+			}
+			if err := s.DeleteIdentity(ctx, a.Account); !errors.Is(err, ErrInUse) {
+				t.Errorf("deleting a worn identity = %v, want ErrInUse", err)
+			}
+			// marked to go with its machine, but the other machine still wears it
+			s.MarkDeleteIdentity(ctx, "vm-e00001")
+			if gone, err := s.DeleteMachine(ctx, "vm-e00001"); err != nil || gone != "" {
+				t.Errorf("deleting one wearer = %q, %v; want the identity kept", gone, err)
+			}
+			if err := s.SetMachineIdentity(ctx, "vm-e00002", "identity-two-dddddddd"); err != nil {
+				t.Errorf("wearing another of hers = %v", err)
+			}
+			if err := s.SetMachineIdentity(ctx, "vm-e00002", "identity-build-cccccccc"); !errors.Is(err, ErrNoIdentity) {
+				t.Errorf("wearing fred's = %v, want ErrNoIdentity", err)
+			}
+			if err := s.DeleteIdentity(ctx, a.Account); err != nil {
+				t.Errorf("deleting it once nobody wears it = %v", err)
+			}
+			if err := s.CreateIdentity(ctx, a, 5); !errors.Is(err, ErrExists) {
+				t.Errorf("making a deleted account again = %v, want ErrExists (never reused)", err)
+			}
+			s.MarkDeleteIdentity(ctx, "vm-e00002")
+			if gone, err := s.DeleteMachine(ctx, "vm-e00002"); err != nil || gone != "identity-two-dddddddd" {
+				t.Errorf("deleting its last wearer = %q, %v; want the identity gone with it", gone, err)
+			}
+			if list, _ := s.Identities(ctx, "erin"); len(list) != 0 {
+				t.Errorf("erin's identities = %+v", list)
+			}
+			if all, _ := s.AllIdentities(ctx); len(all) != 1 || all[0].Owner != "fred" {
+				t.Errorf("all = %+v", all)
 			}
 		})
 	}

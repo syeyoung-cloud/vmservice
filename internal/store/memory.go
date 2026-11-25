@@ -19,13 +19,14 @@ type Memory struct {
 	machines map[string]Machine
 	keys     map[string]Key
 	media    map[string]Medium
-	retired  map[string]bool
+	idents   map[string]Identity
+	retired  map[string]bool // retired identity accounts
 	clock    time.Time
 }
 
 // NewMemory is an empty Memory store.
 func NewMemory() *Memory {
-	return &Memory{members: map[string]string{}, signedIn: map[string]time.Time{}, uids: map[string]*int{}, quotas: map[string]Quota{}, machines: map[string]Machine{}, keys: map[string]Key{}, media: map[string]Medium{}, retired: map[string]bool{}, clock: time.Unix(1_800_000_000, 0)}
+	return &Memory{members: map[string]string{}, signedIn: map[string]time.Time{}, uids: map[string]*int{}, quotas: map[string]Quota{}, machines: map[string]Machine{}, keys: map[string]Key{}, media: map[string]Medium{}, idents: map[string]Identity{}, retired: map[string]bool{}, clock: time.Unix(1_800_000_000, 0)}
 }
 
 func (m *Memory) now() time.Time { m.clock = m.clock.Add(time.Second); return m.clock }
@@ -104,8 +105,11 @@ func (m *Memory) CreateMachine(_ context.Context, x Machine, check func(Usage, Q
 	if err := check(m.usage(x.Owner), m.quotas[x.Owner]); err != nil {
 		return err
 	}
-	if _, ok := m.machines[x.ID]; ok || m.retired[x.ID] {
+	if _, ok := m.machines[x.ID]; ok {
 		return ErrExists
+	}
+	if x.Identity != "" && m.idents[x.Identity].Owner != x.Owner {
+		return ErrNoIdentity
 	}
 	for _, o := range m.machines {
 		if o.Name == x.Name {
@@ -114,6 +118,7 @@ func (m *Memory) CreateMachine(_ context.Context, x Machine, check func(Usage, Q
 	}
 	x.CreatedAt = m.now()
 	x.OwnerName = m.members[x.Owner]
+	x.IdentityName = m.idents[x.Identity].Name
 	m.machines[x.ID] = x
 	return nil
 }
@@ -147,14 +152,141 @@ func (m *Memory) Usage(_ context.Context, owner string) (Usage, error) {
 	return m.usage(owner), nil
 }
 
-func (m *Memory) DeleteMachine(_ context.Context, id string) error {
+func (m *Memory) DeleteMachine(_ context.Context, id string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.machines[id]; ok {
-		delete(m.machines, id)
-		m.retired[id] = true
+	x, ok := m.machines[id]
+	if !ok {
+		return "", nil
 	}
+	delete(m.machines, id)
+	if !x.DeleteIdentity || x.Identity == "" || m.worn(x.Identity) {
+		return "", nil
+	}
+	delete(m.idents, x.Identity)
+	m.retired[x.Identity] = true
+	return x.Identity, nil
+}
+
+func (m *Memory) worn(account string) bool {
+	for _, o := range m.machines {
+		if o.Identity == account {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Memory) SetMachineIdentity(_ context.Context, id, account string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	x, ok := m.machines[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if account == "" || m.idents[account].Owner != x.Owner {
+		return ErrNoIdentity
+	}
+	x.Identity, x.IdentityName = account, m.idents[account].Name
+	m.machines[id] = x
 	return nil
+}
+
+func (m *Memory) MarkDeleteIdentity(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	x, ok := m.machines[id]
+	if !ok {
+		return ErrNotFound
+	}
+	x.DeleteIdentity = true
+	m.machines[id] = x
+	return nil
+}
+
+func (m *Memory) CreateIdentity(_ context.Context, i Identity, max int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.members[i.Owner]; !ok {
+		return fmt.Errorf("owner %q isn't a member (foreign key)", i.Owner)
+	}
+	n := 0
+	for _, o := range m.idents {
+		if o.Owner == i.Owner {
+			n++
+			if o.Name == i.Name {
+				return ErrExists
+			}
+		}
+	}
+	if n >= max {
+		return &LimitError{Message: fmt.Sprintf("You have %d identities, the most there may be.", n)}
+	}
+	if _, ok := m.idents[i.Account]; ok || m.retired[i.Account] {
+		return ErrExists
+	}
+	i.CreatedAt, i.OwnerName, i.UsedBy = m.now(), m.members[i.Owner], nil
+	m.idents[i.Account] = i
+	return nil
+}
+
+func (m *Memory) DeleteIdentity(_ context.Context, account string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.idents[account]; !ok {
+		return ErrNotFound
+	}
+	if m.worn(account) {
+		return ErrInUse
+	}
+	delete(m.idents, account)
+	m.retired[account] = true
+	return nil
+}
+
+func (m *Memory) withUse(i Identity) Identity {
+	i.UsedBy = []string{}
+	for _, o := range m.machines {
+		if o.Identity == i.Account {
+			i.UsedBy = append(i.UsedBy, o.Name)
+		}
+	}
+	sort.Strings(i.UsedBy)
+	return i
+}
+
+func (m *Memory) Identity(_ context.Context, account string) (Identity, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	i, ok := m.idents[account]
+	if !ok {
+		return Identity{}, ErrNotFound
+	}
+	return m.withUse(i), nil
+}
+
+func (m *Memory) Identities(_ context.Context, owner string) ([]Identity, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []Identity{}
+	for _, i := range m.idents {
+		if i.Owner == owner {
+			out = append(out, m.withUse(i))
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].CreatedAt.Before(out[b].CreatedAt) })
+	return out, nil
+}
+
+func (m *Memory) AllIdentities(_ context.Context) ([]Identity, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []Identity{}
+	for _, i := range m.idents {
+		out = append(out, m.withUse(i))
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].CreatedAt.Before(out[b].CreatedAt) })
+	return out, nil
 }
 
 func (m *Memory) AddKey(_ context.Context, k Key, max int) error {

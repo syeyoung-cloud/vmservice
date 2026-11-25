@@ -56,6 +56,9 @@ export const Sidebar = () => {
             <SidebarLink href="/images" icon={<Icon name="hard-drive" size={15} />}>
               Images
             </SidebarLink>
+            <SidebarLink href="/identities" icon={<Icon name="shield" size={15} />}>
+              Identities
+            </SidebarLink>
             <SidebarLink href="/keys" icon={<Icon name="user" size={15} />}>
               Account
             </SidebarLink>

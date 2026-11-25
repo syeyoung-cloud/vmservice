@@ -177,12 +177,16 @@ func TestCreateFromPresetGivesTheMembersAccount(t *testing.T) {
 			t.Errorf("disk %s = %+v, want virtio-scsi", d.Name, d.DiskDevice)
 		}
 	}
-	var sa corev1.ServiceAccount
-	if err := s.read.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &sa); err != nil || len(sa.OwnerReferences) != 1 || sa.OwnerReferences[0].Name != m.ID {
-		t.Errorf("the machine's service account = %+v, %v", sa.ObjectMeta, err)
+	// its own identity, named after it, worn through the identity volume
+	if m.Identity != "box1" || !strings.HasPrefix(m.IdentityAccount, "identity-box1-") {
+		t.Errorf("machine identity = %q %q", m.Identity, m.IdentityAccount)
 	}
-	if !hasVolume(&vm, volumeIdentity) {
-		t.Error("the VM lacks its identity volume")
+	var sa corev1.ServiceAccount
+	if err := s.read.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.IdentityAccount}, &sa); err != nil || sa.Labels[LabelIdentity] != m.IdentityAccount {
+		t.Errorf("the identity's service account = %+v, %v", sa.ObjectMeta, err)
+	}
+	if v := identityOfVM(&vm); v != m.IdentityAccount {
+		t.Errorf("the VM wears %q, want %q", v, m.IdentityAccount)
 	}
 	for _, d := range vm.Spec.Template.Spec.Domain.Devices.Disks {
 		if d.Name == volumeIdentity {
@@ -268,7 +272,7 @@ func TestImageVisibilityAndAdmin(t *testing.T) {
 	if all, _ := s.AllMachines(ctx, admin); len(all) != 1 {
 		t.Errorf("admin AllMachines = %v", all)
 	}
-	if err := s.Delete(ctx, admin, m.ID); err != nil {
+	if err := s.Delete(ctx, admin, m.ID, false); err != nil {
 		t.Errorf("admin deleting a machine = %v", err)
 	}
 	s.store.DeleteMachine(ctx, m.ID) // what the VM watch does once the VM is gone
@@ -489,7 +493,7 @@ func TestDeleteMissingVM(t *testing.T) {
 	s, _ := testService(t)
 	ctx := context.Background()
 	s.store.CreateMachine(ctx, store.Machine{ID: "vm-mmmmmm", Owner: "alice", Name: "ghost"}, func(store.Usage, store.Quota) error { return nil })
-	if err := s.Delete(ctx, alice, "vm-mmmmmm"); status(err) != http.StatusConflict {
+	if err := s.Delete(ctx, alice, "vm-mmmmmm", false); status(err) != http.StatusConflict {
 		t.Errorf("delete right after the row = %v, want 409 (a create may still be making the VM)", err)
 	}
 }
@@ -586,32 +590,113 @@ func TestResize(t *testing.T) {
 	}
 }
 
+func identityOfVM(vm *kubevirtv1.VirtualMachine) string {
+	for _, v := range vm.Spec.Template.Spec.Volumes {
+		if v.Name == volumeIdentity && v.ServiceAccount != nil {
+			return v.ServiceAccount.ServiceAccountName
+		}
+	}
+	return ""
+}
+
+func TestIdentities(t *testing.T) {
+	s, _ := testService(t)
+	ctx := context.Background()
+	img := readyImage(t, s, alice, qcowHeader(5), 700<<20, "bios")
+	yes := true
+	s.UpdateMedium(ctx, alice, img, store.MediumUpdate{Public: &yes})
+	build, err := s.CreateIdentity(ctx, alice, "build")
+	if err != nil || build.Subject != "system:serviceaccount:cloud:"+build.Account || !build.Mine {
+		t.Fatalf("create identity = %+v, %v", build, err)
+	}
+	if _, err := s.CreateIdentity(ctx, alice, "build"); status(err) != http.StatusConflict {
+		t.Errorf("a second identity named build = %v, want 409", err)
+	}
+	if _, err := s.CreateIdentity(ctx, alice, "Bad Name"); status(err) != http.StatusBadRequest {
+		t.Errorf("bad name = %v, want 400", err)
+	}
+	// two machines wear "build"
+	r := request("one", img)
+	r.Size.CPU = 1
+	r.Identity = "build"
+	one, err := s.Create(ctx, alice, r)
+	if err != nil || one.IdentityAccount != build.Account || one.Identity != "build" {
+		t.Fatalf("create wearing build = %+v, %v", one, err)
+	}
+	r.Name = "two"
+	two, err := s.Create(ctx, alice, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := s.Identities(ctx, alice); len(list) != 1 || len(list[0].UsedBy) != 2 {
+		t.Errorf("alice's identities = %+v (no own identity for machines that wear one)", list)
+	}
+	if _, err := s.Create(ctx, bob, func() Request { q := request("bobs", img); q.Identity = "build"; return q }()); status(err) != http.StatusBadRequest {
+		t.Errorf("bob wearing alice's identity = %v, want 400", err)
+	}
+	if err := s.DeleteIdentity(ctx, alice, build.Account); status(err) != http.StatusConflict {
+		t.Errorf("deleting a worn identity = %v, want 409", err)
+	}
+	if err := s.DeleteIdentity(ctx, bob, build.Account); err != ErrNotFound {
+		t.Errorf("bob deleting alice's identity = %v, want not found", err)
+	}
+	// "two" moves to a new identity; "one" is deleted with "build", which goes once nobody wears it
+	if _, err := s.CreateIdentity(ctx, alice, "other"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetIdentity(ctx, alice, two.ID, "other"); err != nil {
+		t.Fatal(err)
+	}
+	var vm kubevirtv1.VirtualMachine
+	s.read.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: two.ID}, &vm)
+	if got, _ := s.Get(ctx, alice, two.ID); got.Identity != "other" || identityOfVM(&vm) != got.IdentityAccount {
+		t.Errorf("after set identity: machine %q, VM wears %q", got.Identity, identityOfVM(&vm))
+	}
+	if err := s.SetIdentity(ctx, alice, two.ID, "nope"); status(err) != http.StatusBadRequest {
+		t.Errorf("set to a missing identity = %v, want 400", err)
+	}
+	if err := s.Delete(ctx, alice, one.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	s.removeRow(&kubevirtv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: one.ID, Namespace: "cloud"}}) // what the VM watch does
+	var sa corev1.ServiceAccount
+	if err := s.read.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: build.Account}, &sa); err == nil {
+		t.Error("the identity's service account outlived it")
+	}
+	if list, _ := s.Identities(ctx, alice); len(list) != 1 || list[0].Name != "other" {
+		t.Errorf("after deleting its last wearer with it: %+v", list)
+	}
+}
+
 func TestEnsureIdentitiesBackfills(t *testing.T) {
 	s, _ := testService(t)
 	ctx := context.Background()
 	img := readyImage(t, s, alice, qcowHeader(5), 700<<20, "bios")
+	// a machine from before identities: a row with none, a VM without the volume
 	m, err := s.Create(ctx, alice, request("old", img))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// as a machine from before identities: no volume, no service account
+	row, _ := s.store.Machine(ctx, m.ID)
+	s.store.DeleteMachine(ctx, m.ID)
+	row.Identity = ""
+	s.store.CreateMachine(ctx, row, func(store.Usage, store.Quota) error { return nil })
+	s.store.DeleteIdentity(ctx, m.IdentityAccount)
 	var vm kubevirtv1.VirtualMachine
 	s.write.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &vm)
 	vm.Spec.Template.Spec.Volumes = slices.DeleteFunc(vm.Spec.Template.Spec.Volumes, func(v kubevirtv1.Volume) bool { return v.Name == volumeIdentity })
 	s.write.Update(ctx, &vm)
-	s.write.Delete(ctx, &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "cloud", Name: m.ID}})
 
 	s.ensureIdentities(ctx)
 	s.ensureIdentities(ctx) // twice: idempotent
+	got, _ := s.store.Machine(ctx, m.ID)
 	s.write.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &vm)
-	n := 0
-	for _, v := range vm.Spec.Template.Spec.Volumes {
-		if v.Name == volumeIdentity {
-			n++
-		}
+	if got.Identity == "" || identityOfVM(&vm) != got.Identity {
+		t.Errorf("after the backfill: row %q, VM %q", got.Identity, identityOfVM(&vm))
 	}
-	var sa corev1.ServiceAccount
-	if n != 1 || s.write.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &sa) != nil {
-		t.Errorf("after the backfill: %d identity volumes, service account found = %v", n, s.write.Get(ctx, client.ObjectKey{Namespace: "cloud", Name: m.ID}, &sa) == nil)
+	var sas corev1.ServiceAccountList
+	s.write.List(ctx, &sas, client.InNamespace("cloud"), client.HasLabels{LabelIdentity})
+	if len(sas.Items) != 1 || sas.Items[0].Name != got.Identity {
+		t.Errorf("identity accounts = %d (the deleted one's must be gone, the new one there)", len(sas.Items))
 	}
 }

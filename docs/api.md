@@ -246,3 +246,41 @@ machine's events (`vm` events of other members' machines carry `"owner"`).
   doesn't check keys at the jump hop; the machine's own sshd signs you in (your account and keys from
   cloud-init). SSH keys registered in the portal are what new machines get; they no longer matter
   to the jump hop.
+
+## v0.7: identities and the metadata service
+
+A machine wears an **identity**: what it is to other services. An identity is a ServiceAccount of
+the machines' namespace, `identity-<name>-<8 random characters>`, never reused; its tokens are issued
+by the cluster (`https://kubernetes.syeyoung.dev`) with subject
+`system:serviceaccount:<namespace>:<account>`. A member owns it; several machines may wear one and
+share what is granted to it; every machine wears exactly one. Deleted and made again under the same
+name, it is another identity, with another subject.
+
+Identity: `{"name", "account", "subject", "issuer", "owner", "mine", "usedBy": [machine names], "createdAt"}`.
+
+| Call | |
+|---|---|
+| `GET /api/identities` | `{"identities": [identity, ...]}`: the caller's (admins: all), oldest first |
+| `POST /api/identities` | body `{"name"}` (a DNS label, 1–63) → `201` identity. `409` if the caller has one by that name, `403` at 100 |
+| `DELETE /api/identities/{account}` | `204`; owner or admin. `409` while a machine wears it |
+| `POST /api/vms` | also takes `"identity"`: the name of one of the caller's identities. Absent or `""`: a new identity named after the machine (`409` if the caller already has one by that name) |
+| `PUT /api/vms/{id}/identity` | body `{"identity": "<name>"}`, one of the machine owner's → `204`. From the machine's next start (Restart or Stop/Start here) |
+| `DELETE /api/vms/{id}?identity=delete` | also deletes its identity, once the machine is gone, if no other machine wears it then |
+| `PUT /api/vms/{id}/size` | body `{"size": "<catalog size id>"}` → `204`, within the owner's limits; from the machine's next start |
+
+A machine's JSON carries `"identity"` (its name) and `"identityAccount"`. Machines from before
+identities get one of their own, named after them, when the service starts.
+
+### Tokens, from inside a machine
+
+```sh
+curl -s -H 'Metadata: true' 'http://169.254.169.254/v1/token?audience=https://files.drive.syeyoung.dev'
+# → {"token": "<JWT>", "expiresIn": 3599, "issuer": "https://kubernetes.syeyoung.dev",
+#    "subject": "system:serviceaccount:syeyoung-cloud:identity-build-k2m9xqtz"}
+```
+
+Exactly one `audience`; the token is made out to it only, lasts one hour, and is bound to the
+machine's running instance (it stops being valid when the machine stops). `Accept: text/plain`
+answers the token alone. Asking again within the hour gives the same token. Without the
+`Metadata: true` header, or through a proxy (`Forwarded`, `X-Forwarded-*`, `Via`), it's refused
+(`400`). Windows and Linux machines alike.

@@ -30,23 +30,25 @@ const (
 
 // Machine is a member's VM as the API shows it.
 type Machine struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Image        string    `json:"image"`
-	ImageName    string    `json:"imageName"`
-	DefaultUser  string    `json:"defaultUser"` // = User, for older clients
-	User         string    `json:"user"`        // the account to sign in as ("" for Windows)
-	Owner        string    `json:"owner"`       // the owner's username
-	Size         string    `json:"size"`
-	CPU          int       `json:"cpu"`
-	MemoryMiB    int       `json:"memoryMiB"`
-	DiskGiB      int       `json:"diskGiB"`
-	Media        string    `json:"media,omitempty"`   // the medium it was made from
-	Profile      string    `json:"profile,omitempty"` // its device profile (from media)
-	InstallMedia bool      `json:"installMedia"`      // its install CD-ROMs are still attached (Eject)
-	State        string    `json:"state"`
-	Detail       string    `json:"detail"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	Image           string    `json:"image"`
+	ImageName       string    `json:"imageName"`
+	DefaultUser     string    `json:"defaultUser"` // = User, for older clients
+	User            string    `json:"user"`        // the account to sign in as ("" for Windows)
+	Owner           string    `json:"owner"`       // the owner's username
+	Size            string    `json:"size"`
+	CPU             int       `json:"cpu"`
+	MemoryMiB       int       `json:"memoryMiB"`
+	DiskGiB         int       `json:"diskGiB"`
+	Media           string    `json:"media,omitempty"`   // the medium it was made from
+	Profile         string    `json:"profile,omitempty"` // its device profile (from media)
+	InstallMedia    bool      `json:"installMedia"`      // its install CD-ROMs are still attached (Eject)
+	Identity        string    `json:"identity"`          // the name of the identity it wears
+	IdentityAccount string    `json:"identityAccount"`
+	State           string    `json:"state"`
+	Detail          string    `json:"detail"`
+	CreatedAt       time.Time `json:"createdAt"`
 }
 
 // Request is what a member asks for in POST /api/vms, after checking.
@@ -66,19 +68,21 @@ type Request struct {
 	// MediaID is the image it's made from; ProfileOverride replaces the image's detected profile.
 	MediaID         string
 	ProfileOverride string
-	media           *mediaRef // resolved by Create
-	cloudExtras     map[string]any
-	profile         string // the profile it gets
-	driversImage    string
+	// Identity is the name of one of the member's identities to wear; "": a new one, named after
+	// the machine.
+	Identity     string
+	identity     string    // its account, resolved by Create
+	media        *mediaRef // resolved by Create
+	cloudExtras  map[string]any
+	profile      string // the profile it gets
+	driversImage string
 }
 
 // Volumes of a machine made from an ISO, removed by Eject.
 const (
-	volumeInstall = "install" // the ISO, cloned per machine
-	volumeDrivers = "drivers" // the virtio driver CD (Windows)
-	// The machine's service account, as the launcher pod's: KubeVirt runs the pod as it. No disk
-	// refers to it, so the guest never sees the token; the metadata relay uses it (package metadata).
-	volumeIdentity = "identity"
+	volumeInstall  = "install"  // the ISO, cloned per machine
+	volumeDrivers  = "drivers"  // the virtio driver CD (Windows)
+	volumeIdentity = "identity" // the identity it wears (identityVolume)
 )
 
 func installName(id string) string { return id + "-install" }
@@ -165,7 +169,7 @@ func buildVM(namespace, id, owner, storageClass string, r Request) *kubevirtv1.V
 						{Name: "cloudinit", VolumeSource: kubevirtv1.VolumeSource{CloudInitNoCloud: &kubevirtv1.CloudInitNoCloudSource{
 							UserDataSecretRef: &corev1.LocalObjectReference{Name: secretName(id)},
 						}}},
-						identityVolume(id),
+						identityVolume(r.identity),
 					},
 				},
 			},
@@ -215,27 +219,12 @@ func cloudConfig(hostname string, r Request) ([]byte, error) {
 }
 
 // buildSecret is the cloud-init Secret, owned by the VM so it goes when the VM does.
-func identityVolume(id string) kubevirtv1.Volume {
+// identityVolume has the launcher pod run as the identity's ServiceAccount. No disk refers to it,
+// so the guest never sees the token; the metadata relay uses it (package metadata).
+func identityVolume(account string) kubevirtv1.Volume {
 	return kubevirtv1.Volume{Name: volumeIdentity, VolumeSource: kubevirtv1.VolumeSource{
-		ServiceAccount: &kubevirtv1.ServiceAccountVolumeSource{ServiceAccountName: id},
+		ServiceAccount: &kubevirtv1.ServiceAccountVolumeSource{ServiceAccountName: account},
 	}}
-}
-
-// buildServiceAccount is the machine's identity: its tokens say
-// system:serviceaccount:<namespace>:<machine id>. It has no rights in the cluster. It is the VM's,
-// so it goes with it; machine IDs are never reused, so no later machine is ever this subject.
-func buildServiceAccount(vm *kubevirtv1.VirtualMachine) *corev1.ServiceAccount {
-	no := false
-	return &corev1.ServiceAccount{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: vm.Name, Namespace: vm.Namespace,
-			Labels: map[string]string{LabelOwner: vm.Labels[LabelOwner], LabelMachine: vm.Name},
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: kubevirtv1.SchemeGroupVersion.String(), Kind: "VirtualMachine", Name: vm.Name, UID: vm.UID,
-			}},
-		},
-		AutomountServiceAccountToken: &no, // KubeVirt mounts it in the launcher pod itself
-	}
 }
 
 func buildSecret(vm *kubevirtv1.VirtualMachine, userData []byte) *corev1.Secret {
@@ -263,6 +252,7 @@ func toMachine(row store.Machine, vm *kubevirtv1.VirtualMachine, disk *cdiv1.Dat
 		ID: row.ID, Name: row.Name, Image: row.Media, ImageName: row.Image, Size: row.Size,
 		CPU: row.CPU, MemoryMiB: row.MemoryMiB, DiskGiB: row.DiskGiB, CreatedAt: row.CreatedAt.UTC(),
 		Media: row.Media, Profile: row.Profile, InstallMedia: hasInstallMedia(vm), Owner: row.OwnerName,
+		Identity: row.IdentityName, IdentityAccount: row.Identity,
 	}
 	if row.Profile != "windows" {
 		m.User, m.DefaultUser = row.OwnerName, row.OwnerName
