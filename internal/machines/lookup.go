@@ -16,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/cyoung06/vmservice/internal/store"
+	"github.com/syeyoung-cloud/vmservice/internal/store"
 )
 
 // Lookup is the read-only view the SSH bastion runs on, in a process of its own: which machine a

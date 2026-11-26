@@ -16,8 +16,8 @@ import (
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 	"sigs.k8s.io/yaml"
 
-	"github.com/cyoung06/vmservice/internal/config"
-	"github.com/cyoung06/vmservice/internal/store"
+	"github.com/syeyoung-cloud/vmservice/internal/config"
+	"github.com/syeyoung-cloud/vmservice/internal/store"
 )
 
 // The labels and annotations the service puts on what it creates. Only the service writes to the

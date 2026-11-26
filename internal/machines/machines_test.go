@@ -25,9 +25,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/yaml"
 
-	"github.com/cyoung06/vmservice/internal/config"
-	"github.com/cyoung06/vmservice/internal/inspect"
-	"github.com/cyoung06/vmservice/internal/store"
+	"github.com/syeyoung-cloud/vmservice/internal/config"
+	"github.com/syeyoung-cloud/vmservice/internal/inspect"
+	"github.com/syeyoung-cloud/vmservice/internal/store"
 )
 
 var catalog = &config.Catalog{

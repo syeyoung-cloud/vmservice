@@ -13,11 +13,11 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cyoung06/vmservice/internal/auth"
-	"github.com/cyoung06/vmservice/internal/console"
-	"github.com/cyoung06/vmservice/internal/limit"
-	"github.com/cyoung06/vmservice/internal/machines"
-	"github.com/cyoung06/vmservice/internal/store"
+	"github.com/syeyoung-cloud/vmservice/internal/auth"
+	"github.com/syeyoung-cloud/vmservice/internal/console"
+	"github.com/syeyoung-cloud/vmservice/internal/limit"
+	"github.com/syeyoung-cloud/vmservice/internal/machines"
+	"github.com/syeyoung-cloud/vmservice/internal/store"
 )
 
 // API serves /api/.

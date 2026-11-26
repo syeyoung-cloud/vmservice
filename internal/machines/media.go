@@ -26,8 +26,8 @@ import (
 	uploadv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/upload/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/cyoung06/vmservice/internal/inspect"
-	"github.com/cyoung06/vmservice/internal/store"
+	"github.com/syeyoung-cloud/vmservice/internal/inspect"
+	"github.com/syeyoung-cloud/vmservice/internal/store"
 )
 
 // Media: members' ISOs and disk images. The data is a DataVolume named after the medium's id (CDI

@@ -22,16 +22,16 @@ import (
 
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
-	"github.com/cyoung06/vmservice/internal/api"
-	"github.com/cyoung06/vmservice/internal/auth"
-	"github.com/cyoung06/vmservice/internal/bastion"
-	"github.com/cyoung06/vmservice/internal/config"
-	"github.com/cyoung06/vmservice/internal/console"
-	"github.com/cyoung06/vmservice/internal/inspect"
-	"github.com/cyoung06/vmservice/internal/limit"
-	"github.com/cyoung06/vmservice/internal/machines"
-	"github.com/cyoung06/vmservice/internal/store"
-	"github.com/cyoung06/vmservice/internal/web"
+	"github.com/syeyoung-cloud/vmservice/internal/api"
+	"github.com/syeyoung-cloud/vmservice/internal/auth"
+	"github.com/syeyoung-cloud/vmservice/internal/bastion"
+	"github.com/syeyoung-cloud/vmservice/internal/config"
+	"github.com/syeyoung-cloud/vmservice/internal/console"
+	"github.com/syeyoung-cloud/vmservice/internal/inspect"
+	"github.com/syeyoung-cloud/vmservice/internal/limit"
+	"github.com/syeyoung-cloud/vmservice/internal/machines"
+	"github.com/syeyoung-cloud/vmservice/internal/store"
+	"github.com/syeyoung-cloud/vmservice/internal/web"
 )
 
 var version = "dev"

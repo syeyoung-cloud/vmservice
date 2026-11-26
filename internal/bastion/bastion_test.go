@@ -17,7 +17,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/cyoung06/vmservice/internal/limit"
+	"github.com/syeyoung-cloud/vmservice/internal/limit"
 )
 
 type fakeMachines struct{}

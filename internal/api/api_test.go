@@ -13,9 +13,9 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/cyoung06/vmservice/internal/auth"
-	"github.com/cyoung06/vmservice/internal/limit"
-	"github.com/cyoung06/vmservice/internal/web"
+	"github.com/syeyoung-cloud/vmservice/internal/auth"
+	"github.com/syeyoung-cloud/vmservice/internal/limit"
+	"github.com/syeyoung-cloud/vmservice/internal/web"
 )
 
 // testAPI is the API with sign-in against a fake provider (discovery only) and no machines: these

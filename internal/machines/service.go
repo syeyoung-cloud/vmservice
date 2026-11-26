@@ -38,8 +38,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/cyoung06/vmservice/internal/config"
-	"github.com/cyoung06/vmservice/internal/store"
+	"github.com/syeyoung-cloud/vmservice/internal/config"
+	"github.com/syeyoung-cloud/vmservice/internal/store"
 )
 
 // Error is a refusal with the HTTP status the API answers with.

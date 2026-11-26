@@ -1,4 +1,4 @@
-module github.com/cyoung06/vmservice
+module github.com/syeyoung-cloud/vmservice
 
 go 1.26.0
 

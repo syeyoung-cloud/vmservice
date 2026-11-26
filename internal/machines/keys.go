@@ -14,7 +14,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"github.com/cyoung06/vmservice/internal/store"
+	"github.com/syeyoung-cloud/vmservice/internal/store"
 )
 
 // SSH keys live in the store, keyed by the SHA-256 of the key itself: a key belongs to one member

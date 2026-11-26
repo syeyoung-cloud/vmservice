@@ -21,7 +21,7 @@ import (
 	toolscache "k8s.io/client-go/tools/cache"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
-	"github.com/cyoung06/vmservice/internal/metadata"
+	"github.com/syeyoung-cloud/vmservice/internal/metadata"
 )
 
 // runRelay is the container the admission policy adds to every launcher pod.
