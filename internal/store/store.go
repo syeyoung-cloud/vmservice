@@ -153,6 +153,9 @@ type Store interface {
 	// ResizeMachine sets machine id's size if the owner's other machines plus it at that size stay
 	// within check's limits; check returns a *LimitError when they wouldn't. ErrNotFound if no machine.
 	ResizeMachine(ctx context.Context, id, size string, cpu, memoryMiB int, check func(Usage, Quota) error) error
+	// MachineID is the id of the machine with that id or name (the bastion's lookup: it reads only
+	// machines, all its read-only role may need).
+	MachineID(ctx context.Context, idOrName string) (string, error)
 	// MachineByName is the machine named name (names are unique across everyone).
 	MachineByName(ctx context.Context, name string) (Machine, error)
 	AllMachines(ctx context.Context) ([]Machine, error)
@@ -493,6 +496,15 @@ func scanMachine(row pgx.Row) (Machine, error) {
 		return m, ErrNotFound
 	}
 	return m, err
+}
+
+func (p *Postgres) MachineID(ctx context.Context, idOrName string) (string, error) {
+	var id string
+	err := p.pool.QueryRow(ctx, `SELECT id FROM machines WHERE id = $1 OR name = $1`, idOrName).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return id, err
 }
 
 func (p *Postgres) Machine(ctx context.Context, id string) (Machine, error) {

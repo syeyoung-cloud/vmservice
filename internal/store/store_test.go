@@ -308,6 +308,18 @@ func TestReadOnlyRole(t *testing.T) {
 	if _, err := ro.SignedInAt(ctx, "alice"); err != nil {
 		t.Errorf("sign-in time as bastion: %v", err)
 	}
+	// The bastion's lookup, as the bastion's role, of a machine that wears an identity (the
+	// portal's machine query joins identities, which the role may not read).
+	owner.CreateIdentity(ctx, Identity{Account: "identity-box-aaaaaaaa", Owner: "alice", Name: "box"}, 5)
+	owner.CreateMachine(ctx, Machine{ID: "vm-ro0001", Owner: "alice", Name: "box", Identity: "identity-box-aaaaaaaa"}, limit2)
+	for _, q := range []string{"box", "vm-ro0001"} {
+		if id, err := ro.MachineID(ctx, q); err != nil || id != "vm-ro0001" {
+			t.Errorf("bastion lookup of %s = %q, %v", q, id, err)
+		}
+	}
+	if _, err := ro.MachineID(ctx, "nope"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("bastion lookup of a missing machine = %v, want ErrNotFound", err)
+	}
 	if err := ro.AddKey(ctx, Key{ID: "k2", Owner: "alice", Line: "x"}, 20); err == nil {
 		t.Error("the bastion's role could add a key")
 	}

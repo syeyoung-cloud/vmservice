@@ -123,6 +123,17 @@ func (m *Memory) CreateMachine(_ context.Context, x Machine, check func(Usage, Q
 	return nil
 }
 
+func (m *Memory) MachineID(_ context.Context, idOrName string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, x := range m.machines {
+		if x.ID == idOrName || x.Name == idOrName {
+			return x.ID, nil
+		}
+	}
+	return "", ErrNotFound
+}
+
 func (m *Memory) Machine(_ context.Context, id string) (Machine, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

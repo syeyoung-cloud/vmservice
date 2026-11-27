@@ -160,6 +160,8 @@ func (b *Bastion) forward(ctx context.Context, source string, nc ssh.NewChannel)
 		message := "no such running machine"
 		if isRefusal(err) {
 			message = err.Error()
+		} else {
+			b.log.Warn("bastion: looking up a machine", "machine", req.Host, "err", err)
 		}
 		nc.Reject(ssh.ConnectionFailed, req.Host+": "+message)
 		return
