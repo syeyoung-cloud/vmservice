@@ -57,23 +57,18 @@ func NewLookup(ctx context.Context, cfg *rest.Config, namespace string, st store
 // Address is the pod-network address of a running machine, by its name (a hostname, unique across
 // everyone) or its id. The bastion is open to anyone: the machine's own sshd signs people in.
 func (l *Lookup) Address(ctx context.Context, host string) (string, error) {
-	var row store.Machine
-	var err error
-	switch {
-	case idFormat.MatchString(host):
-		row, err = l.store.Machine(ctx, host)
-	case hostName.MatchString(host):
-		row, err = l.store.MachineByName(ctx, strings.ToLower(host))
-	default:
+	if !idFormat.MatchString(host) && !hostName.MatchString(host) {
 		return "", ErrNotFound
 	}
+	// Only the id, from machines alone: the read-only role reads nothing more (a lookup through
+	// the portal's machine query once joined a table it may not read, and every jump failed).
+	id, err := l.store.MachineID(ctx, strings.ToLower(host))
 	if errors.Is(err, store.ErrNotFound) {
 		return "", ErrNotFound
 	}
 	if err != nil {
-		return "", err // internal: the bastion shows a generic message
+		return "", err // internal: the bastion shows a generic message and logs it
 	}
-	id := row.ID
 	var vmi kubevirtv1.VirtualMachineInstance
 	if err := l.read.Get(ctx, client.ObjectKey{Namespace: l.Namespace, Name: id}, &vmi); err != nil || vmi.Status.Phase != kubevirtv1.Running {
 		return "", refuse(http.StatusConflict, "The machine isn't running.")
